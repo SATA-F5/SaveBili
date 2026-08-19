@@ -1,0 +1,11 @@
+name: astrbot_plugin_bili_downloader
+display_name: SaveBili
+desc: 使用 saveany 解析并下载 B 站视频，支持扫码登录、多 Cookie 管理。
+version: V 0.1
+author: Shou_Lu
+repo: https://github.com/SATA-F5/SaveBil/releases/
+icon: logo.png
+astrbot_version: ">=4.24.1"
+support_platforms:
+  - aiocqhttp
+  - telegram
