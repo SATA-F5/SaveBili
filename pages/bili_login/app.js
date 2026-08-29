@@ -1,6 +1,5 @@
 import { TEMPLATE } from './template.js';
 const { createApp, ref, reactive, onMounted, onUnmounted, computed } = Vue;
-
 createApp({
     setup() {
         const bridge = window.AstrBotPluginPage;
@@ -11,29 +10,32 @@ createApp({
         const showClearConfirm = ref(false);
         const clearTargetIndex = ref(null);
         const showClearAllConfirm = ref(false);
-
+        // Toast 通知
+        const toastMessage = ref('');
+        const toastVisible = ref(false);
+        let toastTimer = null;
+        const showToast = (msg) => {
+            toastMessage.value = msg;
+            toastVisible.value = true;
+            if (toastTimer) clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => { toastVisible.value = false; }, 2500);
+        };
         // 扫码
         const qrUrl = ref('');
         let pollTimer = null;
-
         // 账密
         const showPasswordLogin = ref(false);
         const passwordForm = reactive({ username: '', password: '' });
         const passwordLoading = ref(false);
-
         // Cookie 输入
         const manualCookie = reactive({ cookie: '', remark: '', priority: 10, enabled: true });
-
         // Cookie 列表
         const cookies = ref([]);
-
         // 配置
         const configForm = reactive({ download_dir: '', max_size_mb: 200, bot_qq: '', quality: 80 });
         const configLoading = ref(false);
-
         const apiGet = (path, params) => bridge.apiGet(path, params);
         const apiPost = (path, data) => bridge.apiPost(path, data);
-
         // 状态加载
         const loadStatus = async () => {
             try {
@@ -42,7 +44,6 @@ createApp({
                 hasCookie.value = cookies.value.some(c => c.enabled);
             } catch (e) { console.error(e); }
         };
-
         // 扫码
         const generateQR = async () => {
             isLoading.value = true;
@@ -62,7 +63,6 @@ createApp({
                 isLoading.value = false;
             }
         };
-
         const startPolling = () => {
             if (pollTimer) clearInterval(pollTimer);
             pollTimer = setInterval(async () => {
@@ -73,13 +73,13 @@ createApp({
                     if (hasAny) {
                         hasCookie.value = true;
                         statusText.value = '✅ 登录成功！Cookie 已保存';
+                        showToast('登录成功');
                         clearInterval(pollTimer);
                         pollTimer = null;
                     }
                 } catch (e) { console.error(e); }
             }, 3000);
         };
-
         // 账密
         const submitPasswordLogin = async () => {
             if (!passwordForm.username || !passwordForm.password) {
@@ -92,6 +92,7 @@ createApp({
                 const data = await apiPost('api/login/password', passwordForm);
                 if (data.success) {
                     statusText.value = '✅ 登录成功！Cookie 已保存';
+                    showToast('登录成功');
                     await loadStatus();
                 } else {
                     statusText.value = '登录失败：' + (data.error || '未知错误');
@@ -102,7 +103,6 @@ createApp({
                 passwordLoading.value = false;
             }
         };
-
         // 手动添加 Cookie
         const addManualCookie = async () => {
             if (!manualCookie.cookie) {
@@ -118,6 +118,7 @@ createApp({
                 });
                 if (data.success) {
                     statusText.value = 'Cookie 添加成功';
+                    showToast('Cookie 添加成功');
                     manualCookie.cookie = '';
                     manualCookie.remark = '';
                     manualCookie.priority = 10;
@@ -130,7 +131,6 @@ createApp({
                 statusText.value = '请求异常：' + e.message;
             }
         };
-
         // Cookie 管理
         const toggleCookie = async (index) => {
             const c = cookies.value[index];
@@ -138,55 +138,55 @@ createApp({
                 index,
                 enabled: !c.enabled,
             });
-            if (data.success) await loadStatus();
+            if (data.success) {
+                await loadStatus();
+                showToast(c.enabled ? '已禁用该 Cookie' : '已启用该 Cookie');
+            }
         };
-
         const updatePriority = async (index, priority) => {
             const data = await apiPost('api/cookies/update', {
                 index,
                 priority: parseInt(priority) || 100,
             });
-            if (data.success) await loadStatus();
+            if (data.success) {
+                await loadStatus();
+                showToast('优先级已更新');
+            }
         };
-
         const requestDeleteCookie = (index) => {
             clearTargetIndex.value = index;
             showClearConfirm.value = true;
         };
-
         const confirmDeleteCookie = async () => {
             showClearConfirm.value = false;
             if (clearTargetIndex.value === null) return;
             const data = await apiPost('api/cookies/delete', { index: clearTargetIndex.value });
             if (data.success) {
                 statusText.value = 'Cookie 已删除';
+                showToast('Cookie 已删除');
                 clearTargetIndex.value = null;
                 await loadStatus();
             }
         };
-
         const cancelDeleteCookie = () => {
             showClearConfirm.value = false;
             clearTargetIndex.value = null;
         };
-
         const requestClearAll = () => {
             showClearAllConfirm.value = true;
         };
-
         const confirmClearAll = async () => {
             showClearAllConfirm.value = false;
             const data = await apiPost('api/cookies/clear', {});
             if (data.success) {
                 statusText.value = '所有 Cookie 已清除';
+                showToast('所有 Cookie 已清除');
                 await loadStatus();
             }
         };
-
         const cancelClearAll = () => {
             showClearAllConfirm.value = false;
         };
-
         // 配置
         const loadConfig = async () => {
             const data = await apiGet('api/config');
@@ -197,7 +197,6 @@ createApp({
                 configForm.quality = data.config.quality;
             }
         };
-
         const saveConfig = async () => {
             configLoading.value = true;
             try {
@@ -209,6 +208,7 @@ createApp({
                 });
                 if (data.success) {
                     statusText.value = '配置已保存';
+                    showToast('配置已保存');
                 } else {
                     statusText.value = '保存失败：' + (data.error || '未知错误');
                 }
@@ -218,7 +218,6 @@ createApp({
                 configLoading.value = false;
             }
         };
-
         onMounted(async () => {
             await loadStatus();
             await loadConfig();
@@ -227,11 +226,10 @@ createApp({
                 await generateQR();
             }
         });
-
         onUnmounted(() => {
             if (pollTimer) clearInterval(pollTimer);
+            if (toastTimer) clearTimeout(toastTimer);
         });
-
         return {
             activeSection,
             statusText,
@@ -246,6 +244,8 @@ createApp({
             configLoading,
             showClearConfirm,
             showClearAllConfirm,
+            toastMessage,
+            toastVisible,
             generateQR,
             submitPasswordLogin,
             addManualCookie,
