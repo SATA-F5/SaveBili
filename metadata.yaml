@@ -2,7 +2,7 @@ name: astrbot_plugin_bili_downloader
 display_name: SaveBili
 short_desc: B站视频下载工具，扫码登录、多Cookie管理、Web配置面板
 desc: 下载B站视频并发送至聊天窗口。支持扫码登录获取高清画质、手动配置Cookie、多Cookie优先级管理，内置Web管理页面用于账号与配置管理。
-version: 1.0.2
+version: 1.1.2
 author: SATA‑F5
 repo: https://github.com/SATA‑F5/SaveBili
 icon: logo.png
