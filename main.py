@@ -11,6 +11,7 @@ import zipfile
 import tarfile
 import shutil
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse, parse_qs
 
 from astrbot.api import AstrBotConfig, logger
@@ -33,11 +34,9 @@ print(gk_art)
 
 @register("saveany_bilibili_downloader", "Shou_Lu",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
-          "1.2.2")
+          "1.3.3")
 class SaveAnyBilibiliDownloader(Star):
 
-    # GitHub 加速镜像候选列表
-    # 排序策略：快速代理在前，老牌稳定代理居中，小众代理垫底
     FFMPEG_MIRROR_CANDIDATES = [
         "https://raw.ihtw.moe/",
         "https://gh.zwy.one/",
@@ -54,10 +53,9 @@ class SaveAnyBilibiliDownloader(Star):
         "https://githubproxy.cc/",
     ]
 
-    # 超时策略：任何一步超时立即切换到下一个镜像，不再苦等
-    FFMPEG_CONNECT_TIMEOUT = 8       # TCP 连接超时（秒）
-    FFMPEG_READ_TIMEOUT = 15         # 两次读取之间的间隔超时（秒）
-    FFMPEG_TOTAL_TIMEOUT = 90        # 单个镜像的总时长上限（秒）
+    FFMPEG_CONNECT_TIMEOUT = 8
+    FFMPEG_READ_TIMEOUT = 30
+    FFMPEG_TOTAL_TIMEOUT = 90
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -70,8 +68,8 @@ class SaveAnyBilibiliDownloader(Star):
         self.bot_qq = ""
         self.quality = 80
         self.ffmpeg_path = None
-        # FFmpeg 下载状态，供 WebUI 轮询
         self.ffmpeg_status = {"status": "idle", "message": "尚未检测 FFmpeg"}
+        self.ffmpeg_downloading = False
 
         if config:
             self.download_dir = str(config.get("download_dir", self.download_dir))
@@ -87,6 +85,7 @@ class SaveAnyBilibiliDownloader(Star):
         self.session = None
         self.plugin_api = PluginAPI(self)
         self._tasks = set()
+        self._recent_requests = {}
 
     def _get_data_dir(self, context: Context) -> Path:
         for attr in ["get_plugin_data_dir", "get_data_dir"]:
@@ -144,7 +143,6 @@ class SaveAnyBilibiliDownloader(Star):
         self.bilibili_cookie = enabled[0]["cookie"] if enabled else ""
 
     def _check_ffmpeg_local(self):
-        """本地快速检查 FFmpeg"""
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
             self.ffmpeg_path = system_ffmpeg
@@ -154,7 +152,6 @@ class SaveAnyBilibiliDownloader(Star):
         bin_dir = self.data_dir / "bin"
         bin_dir.mkdir(exist_ok=True)
         ffmpeg_exe = bin_dir / "ffmpeg.exe" if os.name == 'nt' else bin_dir / "ffmpeg"
-
         if ffmpeg_exe.exists():
             self.ffmpeg_path = str(ffmpeg_exe)
             self.ffmpeg_status = {"status": "ready", "message": "已检测到插件目录下的 FFmpeg"}
@@ -168,16 +165,12 @@ class SaveAnyBilibiliDownloader(Star):
         self.session = aiohttp.ClientSession(timeout=timeout)
         os.makedirs(self.download_dir, exist_ok=True)
         self.plugin_api.register(self.context)
-        logger.info("B站下载插件已启动 (1.2.2 快速切换镜像版)")
-        # 初始化时只进行本地检查，绝对不联网
+        logger.info("B站下载插件已启动 (1.3.3 类型注解修复版)")
         self._check_ffmpeg_local()
 
-    # ================= WebUI 触发下载 FFmpeg（多镜像快速切换） =================
     async def trigger_ffmpeg_download(self):
-        """由 Web API 调用，触发后台下载任务"""
         if self.ffmpeg_status["status"] == "downloading":
             return
-
         self.ffmpeg_status = {"status": "downloading", "message": "正在下载 FFmpeg，请耐心等待..."}
 
         async def download_task():
@@ -201,46 +194,39 @@ class SaveAnyBilibiliDownloader(Star):
 
                 for idx, mirror in enumerate(self.FFMPEG_MIRROR_CANDIDATES, start=1):
                     full_url = mirror + github_url
-                    self.ffmpeg_status["message"] = f"[{idx}/{total_mirrors}] 正在通过 {mirror} 下载..."
-                    logger.info(f"[{idx}/{total_mirrors}] 尝试从镜像下载 FFmpeg: {full_url}")
+                    self.ffmpeg_status = {
+                        "status": "downloading",
+                        "message": f"[{idx}/{total_mirrors}] 正在通过 {mirror} 下载..."
+                    }
+                    logger.info(f"[FFmpeg] [{idx}/{total_mirrors}] 尝试镜像: {mirror}")
                     start_time = time.time()
                     try:
-                        # 单镜像限时，总超时 90 秒，超时立即切下一个
                         await asyncio.wait_for(
                             self._download_file_async(full_url, temp_file),
                             timeout=self.FFMPEG_TOTAL_TIMEOUT,
                         )
                         elapsed = time.time() - start_time
-                        logger.info(f"镜像下载成功: {mirror} (耗时 {elapsed:.1f} 秒)")
+                        logger.info(f"[FFmpeg] 镜像 {mirror} 下载成功 ({elapsed:.1f}s)")
                         break
                     except asyncio.TimeoutError:
                         elapsed = time.time() - start_time
-                        last_error = f"超时 ({elapsed:.1f}s > {self.FFMPEG_TOTAL_TIMEOUT}s)"
-                        logger.warning(f"镜像 {mirror} 超时 ({elapsed:.1f}s)，立即切换到下一个...")
+                        last_error = f"超时 ({elapsed:.1f}s)"
+                        logger.warning(f"[FFmpeg] 镜像 {mirror} 超时，切换下一个")
                     except Exception as e:
-                        elapsed = time.time() - start_time
                         last_error = str(e)
-                        logger.warning(f"镜像 {mirror} 下载失败 ({elapsed:.1f}s): {e}，切换到下一个...")
-
-                    # 清理残留临时文件，避免污染下一个镜像的下载
+                        logger.warning(f"[FFmpeg] 镜像 {mirror} 失败: {e}")
                     if temp_file.exists():
                         try:
                             temp_file.unlink()
                         except Exception:
                             pass
                 else:
-                    # 所有镜像都失败
-                    raise Exception(f"所有 {total_mirrors} 个镜像均下载失败，最后一个错误: {last_error}")
+                    raise Exception(f"所有镜像均失败: {last_error}")
 
-                # 解压（放到线程池，避免阻塞事件循环）
-                self.ffmpeg_status["message"] = "下载完成，正在解压..."
                 await asyncio.to_thread(extract_func, temp_file, bin_dir, target_name)
-
-                # 重新检查
                 self._check_ffmpeg_local()
                 if self.ffmpeg_status["status"] != "ready":
-                    raise Exception("解压完成但未能找到可执行文件")
-
+                    raise Exception("解压完成但未找到可执行文件")
             except Exception as e:
                 logger.error(f"FFmpeg 下载失败: {e}")
                 self.ffmpeg_status = {"status": "error", "message": f"下载失败: {str(e)}"}
@@ -248,19 +234,9 @@ class SaveAnyBilibiliDownloader(Star):
         asyncio.create_task(download_task())
 
     async def _download_file_async(self, url, dest):
-        """
-        下载单个文件。
-        超时策略：连接 8 秒、读间隔 15 秒、总时长由外层 asyncio.wait_for 控制。
-        任一超时抛出异常，让外层快速切换镜像。
-        """
-        timeout = aiohttp.ClientTimeout(
-            total=None,  # 由外层 wait_for 控制
-            connect=self.FFMPEG_CONNECT_TIMEOUT,
-            sock_read=self.FFMPEG_READ_TIMEOUT,
-        )
+        timeout = aiohttp.ClientTimeout(total=None, connect=self.FFMPEG_CONNECT_TIMEOUT, sock_read=self.FFMPEG_READ_TIMEOUT)
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "*/*",
         }
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
@@ -278,7 +254,10 @@ class SaveAnyBilibiliDownloader(Star):
                     with z.open(filename) as source, open(dest_dir / target_name, 'wb') as target:
                         shutil.copyfileobj(source, target)
                     break
-        os.remove(temp_file)
+        try:
+            os.remove(temp_file)
+        except Exception:
+            pass
 
     def _extract_tar(self, temp_file, dest_dir, target_name):
         with tarfile.open(temp_file, "r:xz") as tar:
@@ -287,9 +266,25 @@ class SaveAnyBilibiliDownloader(Star):
                     member.name = os.path.basename(member.name)
                     tar.extract(member, path=dest_dir)
                     break
-        os.remove(temp_file)
+        try:
+            os.remove(temp_file)
+        except Exception:
+            pass
 
-    # ---------- 命令入口 ----------
+    async def _merge_with_ffmpeg(self, video_path: Path, audio_path: Path, output_path: Path):
+        ffmpeg = self.find_ffmpeg()
+        if not ffmpeg:
+            raise RuntimeError("未找到 FFmpeg。请在 WebUI 点击按钮下载，或将 ffmpeg.exe 放到程序同目录。")
+        cmd = [ffmpeg, "-y", "-i", str(video_path), "-i", str(audio_path), "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", "-movflags", "+faststart", str(output_path)]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            err = stderr.decode("utf-8", errors="ignore")[-800:]
+            raise RuntimeError(f"FFmpeg 合并失败：{err}")
+
+    def find_ffmpeg(self) -> Optional[str]:
+        return self.ffmpeg_path
+
     @filter.command("saveany")
     async def saveany(self, event: AstrMessageEvent, url: str):
         if not url:
@@ -300,6 +295,7 @@ class SaveAnyBilibiliDownloader(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         message = event.message_str.strip()
+        logger.info(f"[on_message] 收到消息: {message[:80]}")
         if message.startswith('/saveany'):
             return
         url_or_bvid = self.extract_bvid_or_url(message)
@@ -336,6 +332,8 @@ class SaveAnyBilibiliDownloader(Star):
 
     def detect_input_type(self, text: str) -> dict:
         text = text.strip()
+        if not text:
+            return {"type": "unknown", "id": ""}
         if re.match(r'^(BV[0-9A-Za-z]{10})$', text):
             return {"type": "video", "id": text}
         if re.match(r'^av(\d+)$', text, re.I):
@@ -406,8 +404,19 @@ class SaveAnyBilibiliDownloader(Star):
         if info["type"] == "unknown":
             await event.send(event.plain_result("无法识别的链接类型。"))
             return
+
+        session_id = getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", "default")
+        key = (str(session_id), url_or_bvid.strip())
+        now = time.time()
+        last = self._recent_requests.get(key, 0)
+        if now - last < 10:
+            logger.warning(f"检测到 10 秒内重复请求，已忽略: {url_or_bvid}")
+            return
+        self._recent_requests[key] = now
+
         type_name = {"video": "视频", "bangumi": "番剧", "article": "专栏", "opus": "动态", "favlist": "收藏夹", "collection": "合集"}.get(info["type"], "内容")
         await event.send(event.plain_result(f"已接收您的{type_name}请求，正在后台解析和下载，请稍候..."))
+
         task = asyncio.create_task(self._background_download(event, info))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -430,12 +439,26 @@ class SaveAnyBilibiliDownloader(Star):
     async def _handle_video(self, event, bvid):
         info = await self.get_bilibili_video_info(bvid)
         if not info:
-            await event.send(event.plain_result("获取视频信息失败，请查看控制台日志。")); return
-        cover = await self._fetch_cover_to_temp(info.get("pic")) if info.get("pic") else ""
-        await event.send(event.chain_result([Comp.Image.fromFileSystem(path=cover), Comp.Plain(self.build_video_notify(info))]) if cover else event.plain_result(self.build_video_notify(info)))
+            await event.send(event.plain_result("获取视频信息失败，请查看控制台日志。"))
+            return
+
+        notify_text = self.build_video_notify(info)
+        cover_path = ""
+        if info.get("pic"):
+            cover_path = await self._fetch_cover_to_temp(info["pic"])
+
+        if cover_path:
+            await event.send(event.chain_result([
+                Comp.Image.fromFileSystem(path=cover_path),
+                Comp.Plain(notify_text),
+            ]))
+        else:
+            await event.send(event.plain_result(notify_text))
+
         url = await self.get_download_url(bvid, info.get("aid"), info.get("cid"))
         if not url:
-            await event.send(event.plain_result("获取下载地址失败，请查看控制台日志。")); return
+            await event.send(event.plain_result("获取下载地址失败，请查看控制台日志。"))
+            return
         path = await self.download_file(url, info["title"], None)
         if path:
             await event.send(event.chain_result([Comp.Video.fromFileSystem(path=path)]))
@@ -445,22 +468,36 @@ class SaveAnyBilibiliDownloader(Star):
     async def _handle_bangumi(self, event, ep_or_ss):
         bangumi = await self.get_bangumi_info(ep_or_ss)
         if not bangumi:
-            await event.send(event.plain_result("番剧信息获取失败（超时或无数据），请查看控制台日志。")); return
+            await event.send(event.plain_result("番剧信息获取失败，请查看控制台日志。"))
+            return
         episodes = bangumi.get("episodes", [])
         if ep_or_ss.startswith("ep"):
             episodes = [e for e in episodes if e.get("ep_id") == int(ep_or_ss[2:])]
         if not episodes:
-            await event.send(event.plain_result("未找到可下载的剧集。")); return
+            await event.send(event.plain_result("未找到可下载的剧集。"))
+            return
         if ep_or_ss.startswith("ss") and len(episodes) > 1:
             await event.send(event.plain_result(f"检测到整季共 {len(episodes)} 集，仅下载第 1 集。"))
             episodes = episodes[:1]
+
         for ep in episodes:
-            cover = await self._fetch_cover_to_temp(bangumi.get("cover")) if bangumi.get("cover") else ""
-            await event.send(event.chain_result([Comp.Image.fromFileSystem(path=cover), Comp.Plain(self.build_bangumi_notify(bangumi, ep.get('title'), ep.get('index')))]) if cover else event.plain_result(self.build_bangumi_notify(bangumi, ep.get('title'), ep.get('index'))))
+            notify_text = self.build_bangumi_notify(bangumi, ep.get('title'), ep.get('index'))
+            cover_path = ""
+            if bangumi.get("cover"):
+                cover_path = await self._fetch_cover_to_temp(bangumi["cover"])
+
+            if cover_path:
+                await event.send(event.chain_result([
+                    Comp.Image.fromFileSystem(path=cover_path),
+                    Comp.Plain(notify_text),
+                ]))
+            else:
+                await event.send(event.plain_result(notify_text))
 
             streams = await self.get_bangumi_playurl(ep["ep_id"], ep["cid"])
             if not streams or not streams.get("video_url"):
-                await event.send(event.plain_result(f"第 {ep.get('index')} 集解析失败，请查看控制台输出的原始响应进行排查。")); continue
+                await event.send(event.plain_result(f"第 {ep.get('index')} 集解析失败，请查看控制台输出。"))
+                continue
 
             title = f"{bangumi['title']} - {ep.get('index')} {ep.get('title')}".strip()
             path = await self.download_file(streams["video_url"], title, streams.get("audio_url"))
@@ -482,7 +519,7 @@ class SaveAnyBilibiliDownloader(Star):
                 return None
             vd = data.get("data") or data.get("result")
             if not vd:
-                logger.error(f"视频 API 缺少 data 字段，原始响应: {raw_text}")
+                logger.error(f"视频 API 缺少 data 字段")
                 return None
             return {"bvid": vd.get("bvid"), "aid": vd.get("aid"), "cid": vd.get("cid"), "title": vd.get("title"), "desc": vd.get("desc"), "pic": vd.get("pic"), "owner": vd.get("owner", {}).get("name"), "stat": vd.get("stat", {})}
         except Exception as e:
@@ -504,7 +541,7 @@ class SaveAnyBilibiliDownloader(Star):
                 return None
             d = data.get("data") or data.get("result")
             if not d:
-                logger.error(f"番剧 API 缺少 data 字段，原始响应: {raw_text}")
+                logger.error(f"番剧 API 缺少 data 字段")
                 return None
             raw_eps = d.get("episodes") or []
             for section in d.get("section", []) or []:
@@ -535,7 +572,7 @@ class SaveAnyBilibiliDownloader(Star):
                 return None
             d = data.get("data") or data.get("result")
             if not d:
-                logger.error(f"番剧 playurl 缺少 data 或 result 字段，原始响应: {raw_text}")
+                logger.error(f"番剧 playurl 缺少 data 或 result 字段")
                 return None
 
             result = {"video_url": None, "audio_url": None}
@@ -549,7 +586,6 @@ class SaveAnyBilibiliDownloader(Star):
                     audios.sort(key=lambda a: a.get("bandwidth", 0), reverse=True)
                     result["audio_url"] = audios[0].get("baseUrl")
                 return result if result["video_url"] else None
-
             if d.get("durl"):
                 result["video_url"] = d["durl"][0].get("url")
                 return result
@@ -599,26 +635,19 @@ class SaveAnyBilibiliDownloader(Star):
             logger.info(f"开始下载视频流: {title}")
             if not await self._download_single_file(download_url, video_temp):
                 return None
-
             logger.info(f"开始下载音频流: {title}")
             if not await self._download_single_file(audio_url, audio_temp):
                 return None
-
             logger.info(f"开始合并音视频: {title}")
             if not self.ffmpeg_path:
-                logger.error("未配置 FFmpeg，无法合并音视频。请前往插件 WebUI 点击按钮下载。")
+                logger.error("未配置 FFmpeg")
                 return None
-
             cmd = [self.ffmpeg_path, "-y", "-i", video_temp, "-i", audio_temp, "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", final_path]
-
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, stderr = await proc.communicate()
-
+            _, stderr = await proc.communicate()
             if proc.returncode != 0:
-                error_msg = stderr.decode('utf-8', errors='ignore')[-500:]
-                logger.error(f"FFmpeg 合并失败: {error_msg}")
+                logger.error(f"FFmpeg 合并失败: {stderr.decode('utf-8', errors='ignore')[-500:]}")
                 return None
-
             logger.info(f"音视频合并成功: {final_path}")
             return final_path
         except Exception as e:
@@ -657,7 +686,7 @@ class SaveAnyBilibiliDownloader(Star):
             data = json.loads(raw_text)
             d = data.get("data") or data.get("result")
             if data.get("code") != 0 or not d:
-                logger.error(f"专栏 API 错误: code={data.get('code')}, raw={raw_text}")
+                logger.error(f"专栏 API 错误: code={data.get('code')}")
                 await event.send(event.plain_result("专栏获取失败，请查看控制台日志。"))
                 return
             await event.send(event.plain_result(f"正在获取专栏：\n{d.get('title')}\n作者：{d.get('author', {}).get('name')}\n摘要：{self._format_desc(d.get('summary'))}"))
