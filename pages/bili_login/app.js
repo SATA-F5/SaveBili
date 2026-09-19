@@ -10,6 +10,10 @@ createApp({
         const showClearConfirm = ref(false);
         const clearTargetIndex = ref(null);
         const showClearAllConfirm = ref(false);
+        
+        // FFmpeg 状态
+        const ffmpegStatus = ref({ status: 'idle', message: '尚未检测 FFmpeg' });
+
         // Toast 通知
         const toastMessage = ref('');
         const toastVisible = ref(false);
@@ -72,7 +76,7 @@ createApp({
                     const hasAny = cookies.value.some(c => c.enabled);
                     if (hasAny) {
                         hasCookie.value = true;
-                        statusText.value = '✅ 登录成功！Cookie 已保存';
+                        statusText.value = '登录成功！Cookie 已保存';
                         showToast('登录成功');
                         clearInterval(pollTimer);
                         pollTimer = null;
@@ -91,7 +95,7 @@ createApp({
             try {
                 const data = await apiPost('api/login/password', passwordForm);
                 if (data.success) {
-                    statusText.value = '✅ 登录成功！Cookie 已保存';
+                    statusText.value = '登录成功！Cookie 已保存';
                     showToast('登录成功');
                     await loadStatus();
                 } else {
@@ -218,9 +222,45 @@ createApp({
                 configLoading.value = false;
             }
         };
+        
+        // ---------- FFmpeg 下载逻辑 ----------
+        const loadFFmpegStatus = async () => {
+            try {
+                const data = await apiGet('api/ffmpeg/status');
+                if (data.success) {
+                    ffmpegStatus.value = data.status;
+                }
+            } catch (e) { console.error(e); }
+        };
+
+        const downloadFFmpeg = async () => {
+            ffmpegStatus.value = { status: 'downloading', message: '正在下载中...' };
+            try {
+                const data = await apiPost('api/ffmpeg/download', {});
+                if (data.success) {
+                    showToast('下载任务已启动，请耐心等待');
+                    const timer = setInterval(async () => {
+                        await loadFFmpegStatus();
+                        if (ffmpegStatus.value.status !== 'downloading') {
+                            clearInterval(timer);
+                            if (ffmpegStatus.value.status === 'ready') showToast('FFmpeg 配置成功');
+                            else showToast('下载失败，请查看日志');
+                        }
+                    }, 3000);
+                } else {
+                    showToast(data.error || '启动下载失败');
+                    await loadFFmpegStatus();
+                }
+            } catch (e) {
+                showToast('请求异常：' + e.message);
+                await loadFFmpegStatus();
+            }
+        };
+
         onMounted(async () => {
             await loadStatus();
             await loadConfig();
+            await loadFFmpegStatus();
             if (cookies.value.length === 0) {
                 activeSection.value = 'qrcode';
                 await generateQR();
@@ -246,6 +286,7 @@ createApp({
             showClearAllConfirm,
             toastMessage,
             toastVisible,
+            ffmpegStatus,
             generateQR,
             submitPasswordLogin,
             addManualCookie,
@@ -258,6 +299,7 @@ createApp({
             confirmClearAll,
             cancelClearAll,
             saveConfig,
+            downloadFFmpeg,
         };
     },
     template: TEMPLATE,

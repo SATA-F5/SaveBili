@@ -12,6 +12,7 @@ from astrbot.api import logger
 
 PLUGIN_NAME = "astrbot_plugin_bili_downloader"
 
+
 class PluginAPI:
     def __init__(self, plugin):
         self.plugin = plugin
@@ -28,6 +29,9 @@ class PluginAPI:
             ("/api/cookies/clear", "handle_clear_cookies", ["POST"]),
             ("/api/config", "handle_get_config", ["GET"]),
             ("/api/config/update", "handle_update_config", ["POST"]),
+            # 新增 FFmpeg 相关接口
+            ("/api/ffmpeg/status", "handle_ffmpeg_status", ["GET"]),
+            ("/api/ffmpeg/download", "handle_ffmpeg_download", ["POST"]),
         ]
         for route, handler_name, methods in routes:
             handler = getattr(self, handler_name)
@@ -158,7 +162,6 @@ class PluginAPI:
         if not cookie_str:
             return jsonify({"success": False, "error": "Cookie 不能为空"})
 
-        # 如果用户输入的是纯 SESSDATA 值（不包含 '='），自动添加前缀
         if "=" not in cookie_str:
             cookie_str = f"SESSDATA={cookie_str}"
 
@@ -231,3 +234,19 @@ class PluginAPI:
         import os
         os.makedirs(self.plugin.download_dir, exist_ok=True)
         return jsonify({"success": True})
+
+    # ---------- FFmpeg 状态与下载 ----------
+    async def handle_ffmpeg_status(self):
+        return jsonify({
+            "success": True,
+            "status": self.plugin.ffmpeg_status
+        })
+
+    async def handle_ffmpeg_download(self):
+        try:
+            # 触发后台异步下载，绝不阻塞当前请求
+            await self.plugin.trigger_ffmpeg_download()
+            return jsonify({"success": True, "message": "已开始下载 FFmpeg"})
+        except Exception as e:
+            logger.error(f"触发 FFmpeg 下载失败: {e}")
+            return jsonify({"success": False, "error": str(e)})

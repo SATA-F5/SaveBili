@@ -87,6 +87,20 @@ export const TEMPLATE = `
                 <input v-model="configForm.quality" type="number" min="1">
                 <button @click="saveConfig" :disabled="configLoading">{{ configLoading ? '保存中...' : '保存配置' }}</button>
             </div>
+            
+            <div class="form-group" style="margin-top: 20px;">
+                <h2>FFmpeg 环境配置</h2>
+                <p class="hint">FFmpeg 用于合并 DASH 格式的分离音视频流，缺少它视频将无声。</p>
+                <div style="margin: 10px 0; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px;">
+                    <span>当前状态：</span>
+                    <span :style="{ color: ffmpegStatus.status === 'ready' ? '#00d2ff' : (ffmpegStatus.status === 'error' ? '#ff416c' : '#aaa') }">
+                        {{ ffmpegStatus.message }}
+                    </span>
+                </div>
+                <button @click="downloadFFmpeg" :disabled="ffmpegStatus.status === 'downloading'">
+                    {{ ffmpegStatus.status === 'downloading' ? '正在下载中，请稍候...' : '一键下载 FFmpeg' }}
+                </button>
+            </div>
         </section>
     </main>
     <!-- ASCII 水印背景 -->
@@ -96,7 +110,7 @@ export const TEMPLATE = `
     <!-- 删除确认弹窗 -->
     <div v-if="showClearConfirm" class="modal-overlay" @click.self="cancelDeleteCookie">
         <div class="modal-panel">
-            <h3>⚠️ 警告</h3>
+            <h3>警告</h3>
             <p>确定要删除这条 Cookie 吗？删除后可能影响高清视频下载。</p>
             <div class="modal-actions">
                 <button @click="cancelDeleteCookie">取消</button>
@@ -107,7 +121,7 @@ export const TEMPLATE = `
     <!-- 清除全部确认弹窗 -->
     <div v-if="showClearAllConfirm" class="modal-overlay" @click.self="cancelClearAll">
         <div class="modal-panel">
-            <h3>⚠️ 严重警告</h3>
+            <h3>严重警告</h3>
             <p>确定要清除所有 Cookie 吗？此操作不可撤销，所有账号登录状态将丢失。</p>
             <div class="modal-actions">
                 <button @click="cancelClearAll">取消</button>
