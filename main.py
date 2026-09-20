@@ -34,7 +34,7 @@ print(gk_art)
 
 @register("saveany_bilibili_downloader", "Shou_Lu",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
-          "1.3.3")
+          "1.1.6")
 class SaveAnyBilibiliDownloader(Star):
 
     FFMPEG_MIRROR_CANDIDATES = [
@@ -165,7 +165,7 @@ class SaveAnyBilibiliDownloader(Star):
         self.session = aiohttp.ClientSession(timeout=timeout)
         os.makedirs(self.download_dir, exist_ok=True)
         self.plugin_api.register(self.context)
-        logger.info("B站下载插件已启动 (1.3.3 类型注解修复版)")
+        logger.info("B站下载插件已启动 (1.3.4 路径返回修复版)")
         self._check_ffmpeg_local()
 
     async def trigger_ffmpeg_download(self):
@@ -460,7 +460,7 @@ class SaveAnyBilibiliDownloader(Star):
             await event.send(event.plain_result("获取下载地址失败，请查看控制台日志。"))
             return
         path = await self.download_file(url, info["title"], None)
-        if path:
+        if path and os.path.exists(path):
             await event.send(event.chain_result([Comp.Video.fromFileSystem(path=path)]))
         else:
             await event.send(event.plain_result("下载失败，可能文件过大或网络问题。"))
@@ -501,7 +501,7 @@ class SaveAnyBilibiliDownloader(Star):
 
             title = f"{bangumi['title']} - {ep.get('index')} {ep.get('title')}".strip()
             path = await self.download_file(streams["video_url"], title, streams.get("audio_url"))
-            if path:
+            if path and os.path.exists(path):
                 await event.send(event.chain_result([Comp.Video.fromFileSystem(path=path)]))
             else:
                 await event.send(event.plain_result(f"第 {ep.get('index')} 集下载失败。"))
@@ -625,7 +625,8 @@ class SaveAnyBilibiliDownloader(Star):
 
         if not audio_url:
             file_path = os.path.join(self.download_dir, f"{safe_title}_{timestamp}.mp4")
-            return await self._download_single_file(download_url, file_path)
+            ok = await self._download_single_file(download_url, file_path)
+            return file_path if ok else None
 
         video_temp = os.path.join(self.download_dir, f".{safe_title}_{timestamp}_v.mp4")
         audio_temp = os.path.join(self.download_dir, f".{safe_title}_{timestamp}_a.mp4")
