@@ -23,18 +23,18 @@ from .plugin_api import PluginAPI
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-gk_art = r"""//       ________ __    _____    __                  __   _        
-//      / ____/ //_/   / ___/   / /_   __  __   ____/ /  (_)  ____ 
+gk_art = r"""//       ________ __    _____    __                  __   _
+//      / ____/ //_/   / ___/   / /_   __  __   ____/ /  (_)  ____
 //     / / __/ ,<      \__ \   / __/  / / / /  / __  /  / /  / __ \
 //    / /_/ / /| |    ___/ /  / /_   / /_/ /  / /_/ /  / /  / /_/ /
-//    \____/_/ |_|   /____/   \__/   \__,_/   \__,_/  /_/   \____/ 
+//    \____/_/ |_|   /____/   \__/   \__,_/   \__,_/  /_/   \____/
 """
 print(gk_art)
 
 
 @register("saveany_bilibili_downloader", "Shou_Lu",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
-          "1.1.6")
+          "1.3.5")
 class SaveAnyBilibiliDownloader(Star):
 
     FFMPEG_MIRROR_CANDIDATES = [
@@ -61,7 +61,24 @@ class SaveAnyBilibiliDownloader(Star):
         super().__init__(context)
         self.base_dir = Path(__file__).parent
         self.data_dir = self._get_data_dir(context)
-        os.makedirs(self.data_dir, exist_ok=True)
+
+        # 健壮地创建数据目录，任何异常都退回临时目录
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            if not self.data_dir.is_dir():
+                raise NotADirectoryError(f"{self.data_dir} 不是目录")
+        except Exception as e:
+            logger.error(f"[路径] 创建数据目录失败: {e}")
+            fallback = Path(tempfile.gettempdir()) / "saveany_bilibili_downloader"
+            try:
+                fallback.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                fallback = Path.home() / ".saveany_bilibili_downloader"
+                fallback.mkdir(parents=True, exist_ok=True)
+            logger.warning(f"[路径] 已回退到: {fallback}")
+            self.data_dir = fallback
+
+        logger.info(f"[路径] 插件数据目录: {self.data_dir}")
 
         self.download_dir = "./downloads"
         self.max_size_mb = 2000.0
@@ -87,19 +104,70 @@ class SaveAnyBilibiliDownloader(Star):
         self._tasks = set()
         self._recent_requests = {}
 
+    # ============ 核心修复：路径探测 ============
     def _get_data_dir(self, context: Context) -> Path:
+        """多候选路径探测，避免 ASTRBOT_DATA_DIR 拼接错误。"""
+        PLUGIN_DIR_NAME = "saveany_bilibili_downloader"
+
+        # 1. 优先用 context 提供的官方方法
         for attr in ["get_plugin_data_dir", "get_data_dir"]:
             if hasattr(context, attr):
                 try:
                     dir_path = getattr(context, attr)()
                     if dir_path:
-                        return Path(dir_path) / "saveany_bilibili_downloader"
-                except Exception:
-                    pass
-        env_dir = os.environ.get("ASTRBOT_DATA_DIR")
-        if env_dir:
-            return Path(env_dir) / "plugin_data" / "saveany_bilibili_downloader"
-        return Path.home() / ".astrbot" / "data" / "plugin_data" / "saveany_bilibili_downloader"
+                        p = Path(dir_path)
+                        # 如果返回的就是插件专属目录，直接用
+                        if p.name == PLUGIN_DIR_NAME:
+                            return p
+                        return p / PLUGIN_DIR_NAME
+                except Exception as e:
+                    logger.warning(f"[路径] context.{attr}() 调用失败: {e}")
+
+        # 2. 遍历环境变量候选
+        env_candidates = []
+        for env_key in ("ASTRBOT_DATA_DIR", "ASTRBOT_ROOT", "ASTRBOT_HOME"):
+            env_val = os.environ.get(env_key)
+            if not env_val:
+                continue
+            base = Path(env_val)
+            # 兼容：环境变量可能指向 AstrBot 根目录、data 目录、.astrbot 目录
+            env_candidates.extend([
+                base / "plugin_data" / PLUGIN_DIR_NAME,
+                base / "data" / "plugin_data" / PLUGIN_DIR_NAME,
+                base / ".astrbot" / "plugin_data" / PLUGIN_DIR_NAME,
+                base / ".astrbot" / "data" / "plugin_data" / PLUGIN_DIR_NAME,
+            ])
+
+        # 3. 兜底候选：相对当前工作目录 & 用户主目录
+        env_candidates.extend([
+            Path.cwd() / "data" / "plugin_data" / PLUGIN_DIR_NAME,
+            Path.cwd() / "plugin_data" / PLUGIN_DIR_NAME,
+            Path.home() / ".astrbot" / "data" / "plugin_data" / PLUGIN_DIR_NAME,
+            Path.home() / "AstrBot" / "data" / "plugin_data" / PLUGIN_DIR_NAME,
+        ])
+
+        # 依次尝试：能创建或已存在且是目录就返回
+        first_error = None
+        for cand in env_candidates:
+            try:
+                if cand.exists():
+                    if cand.is_dir():
+                        return cand
+                    else:
+                        # 存在但是文件 → 报错继续试下一个
+                        logger.warning(f"[路径] {cand} 存在但不是目录，跳过")
+                        continue
+                # 不存在：尝试递归创建（先测父目录是否能创建）
+                cand.mkdir(parents=True, exist_ok=True)
+                if cand.is_dir():
+                    return cand
+            except Exception as e:
+                if first_error is None:
+                    first_error = e
+                continue
+
+        # 4. 全部失败 → 抛出，让 __init__ 的 fallback 接住
+        raise RuntimeError(f"无法确定插件数据目录，最后的错误: {first_error}")
 
     def _load_plugin_config(self):
         cfg_file = self.data_dir / "plugin_config.json"
@@ -150,22 +218,31 @@ class SaveAnyBilibiliDownloader(Star):
             return
 
         bin_dir = self.data_dir / "bin"
-        bin_dir.mkdir(exist_ok=True)
+        try:
+            bin_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         ffmpeg_exe = bin_dir / "ffmpeg.exe" if os.name == 'nt' else bin_dir / "ffmpeg"
         if ffmpeg_exe.exists():
             self.ffmpeg_path = str(ffmpeg_exe)
             self.ffmpeg_status = {"status": "ready", "message": "已检测到插件目录下的 FFmpeg"}
             if os.name != 'nt':
-                os.chmod(self.ffmpeg_path, 0o755)
+                try:
+                    os.chmod(self.ffmpeg_path, 0o755)
+                except Exception:
+                    pass
         else:
             self.ffmpeg_status = {"status": "idle", "message": "未检测到 FFmpeg，可点击右侧按钮一键下载"}
 
     async def initialize(self):
         timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=15)
         self.session = aiohttp.ClientSession(timeout=timeout)
-        os.makedirs(self.download_dir, exist_ok=True)
+        try:
+            os.makedirs(self.download_dir, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"[初始化] 创建下载目录失败: {e}")
         self.plugin_api.register(self.context)
-        logger.info("B站下载插件已启动 (1.3.4 路径返回修复版)")
+        logger.info("B站下载插件已启动 (1.3.5 路径兼容版)")
         self._check_ffmpeg_local()
 
     async def trigger_ffmpeg_download(self):
@@ -176,7 +253,7 @@ class SaveAnyBilibiliDownloader(Star):
         async def download_task():
             try:
                 bin_dir = self.data_dir / "bin"
-                bin_dir.mkdir(exist_ok=True)
+                bin_dir.mkdir(parents=True, exist_ok=True)
 
                 if os.name == 'nt':
                     github_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
