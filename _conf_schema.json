@@ -9,11 +9,6 @@
     "description": "允许下载的最大视频大小(MB)",
     "default": 200
   },
-  "bot_qq": {
-    "type": "string",
-    "description": "机器人QQ号，用于@触发识别，留空则自动从事件获取",
-    "default": ""
-  },
   "quality": {
     "type": "int",
     "description": "默认画质代码：80=1080P，112=1080P+，116=1080P60，120=4K",

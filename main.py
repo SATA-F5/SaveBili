@@ -37,6 +37,24 @@ print(gk_art)
           "1.3.5")
 class SaveAnyBilibiliDownloader(Star):
 
+    # B 站短链域名（分享链接常见形式：https://b23.tv/xxxx）
+    SHORT_URL_HOSTS = {
+        "b23.tv",
+        "bili2233.cn",
+        "bili22.cn",
+        "bili23.cn",
+        "bili33.cn",
+    }
+    # 匹配 B 站链接（允许不带 http/https 前缀），只匹配 ASCII URL 字符，
+    # 避免把链接后面的中文分享文案一起吞掉。
+    BILI_URL_PATTERN = re.compile(
+        r"(?<![A-Za-z0-9\-._/])(?:https?://)?(?:[A-Za-z0-9-]+\.)*"
+        r"(?:bilibili\.com|b23\.tv|bili2233\.cn|bili22\.cn|bili23\.cn|bili33\.cn)"
+        r"/[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*",
+        re.I,
+    )
+    URL_TRAILING_CHARS = " \t\r\n\"'`.,;:!?，。；：！？、）)]}】》」』”’…"
+
     FFMPEG_MIRROR_CANDIDATES = [
         "https://raw.ihtw.moe/",
         "https://gh.zwy.one/",
@@ -82,7 +100,6 @@ class SaveAnyBilibiliDownloader(Star):
 
         self.download_dir = "./downloads"
         self.max_size_mb = 2000.0
-        self.bot_qq = ""
         self.quality = 80
         self.ffmpeg_path = None
         self.ffmpeg_status = {"status": "idle", "message": "尚未检测 FFmpeg"}
@@ -91,7 +108,6 @@ class SaveAnyBilibiliDownloader(Star):
         if config:
             self.download_dir = str(config.get("download_dir", self.download_dir))
             self.max_size_mb = float(config.get("max_size_mb", self.max_size_mb))
-            self.bot_qq = str(config.get("bot_qq", self.bot_qq)).strip()
             self.quality = int(config.get("quality", self.quality))
 
         self._load_plugin_config()
@@ -176,7 +192,6 @@ class SaveAnyBilibiliDownloader(Star):
                 data = json.loads(cfg_file.read_text(encoding="utf-8"))
                 self.download_dir = str(data.get("download_dir", self.download_dir))
                 self.max_size_mb = float(data.get("max_size_mb", self.max_size_mb))
-                self.bot_qq = str(data.get("bot_qq", self.bot_qq)).strip()
                 self.quality = int(data.get("quality", self.quality))
             except Exception as e:
                 logger.error(f"加载插件本地配置失败: {e}")
@@ -186,7 +201,6 @@ class SaveAnyBilibiliDownloader(Star):
         data = {
             "download_dir": self.download_dir,
             "max_size_mb": self.max_size_mb,
-            "bot_qq": self.bot_qq,
             "quality": self.quality,
         }
         cfg_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -371,40 +385,99 @@ class SaveAnyBilibiliDownloader(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
+        # 使用 AstrBot 内置唤醒判断：只有 @ 机器人、带唤醒词或私聊消息才会处理，
+        # 不再对群聊中未 @ 机器人的普通 B 站链接自动下载。
+        if not event.is_at_or_wake_command:
+            return
         message = event.message_str.strip()
-        logger.info(f"[on_message] 收到消息: {message[:80]}")
-        if message.startswith('/saveany'):
+        # /saveany 交给指令处理器；唤醒前缀被框架剥离后消息可能以 "saveany" 开头
+        if re.match(r"^/?saveany(?:\s|$)", message):
             return
         url_or_bvid = self.extract_bvid_or_url(message)
         if not url_or_bvid:
             return
-        if 'bilibili.com' in url_or_bvid or 'b23.tv' in url_or_bvid:
-            event.stop_event()
-            await self.download_and_send(event, url_or_bvid)
-            return
-        if await self._is_mentioned(event):
-            event.stop_event()
-            await self.download_and_send(event, url_or_bvid)
+        event.stop_event()
+        await self.download_and_send(event, url_or_bvid)
 
-    async def _is_mentioned(self, event: AstrMessageEvent) -> bool:
-        self_id = getattr(event.message_obj, 'self_id', self.bot_qq)
-        if not self_id:
-            return False
-        for comp in event.get_messages():
-            if isinstance(comp, Comp.At) and str(comp.qq) == str(self_id):
-                return True
-        return False
-
-    def extract_bvid_or_url(self, text: str) -> str:
-        match = re.search(r'https?://[^\s]*(bilibili\.com|b23\.tv)[^\s]*', text)
+    def extract_bvid_or_url(self, text: str) -> Optional[str]:
+        match = self.BILI_URL_PATTERN.search(text)
         if match:
-            return match.group(0)
+            url = match.group(0).rstrip(self.URL_TRAILING_CHARS)
+            if url.lower().startswith(("http://", "https://")):
+                return url
+            return f"https://{url}"
         m = re.search(r'BV[0-9A-Za-z]{10}', text)
         if m:
             return m.group(0)
         m = re.search(r'av(\d+)', text, re.I)
         if m:
             return f"av{m.group(1)}"
+        return None
+
+    @classmethod
+    def _is_short_url(cls, url: str) -> bool:
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            return False
+        return host in cls.SHORT_URL_HOSTS
+
+    async def _resolve_once(self, url: str, headers: dict) -> Optional[str]:
+        """请求短链并返回重定向后的最终地址，HEAD 不可用时回退 GET。"""
+        session = self.session
+        created = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15, connect=8, sock_read=10)
+            )
+            created = True
+        try:
+            for method in ("HEAD", "GET"):
+                async def _probe():
+                    async with session.request(
+                        method, url, allow_redirects=True, headers=headers
+                    ) as resp:
+                        return str(resp.url)
+
+                try:
+                    final_url = await asyncio.wait_for(_probe(), timeout=10.0)
+                except Exception as e:
+                    logger.debug(f"[短链] {method} 请求失败 {url}: {e}")
+                    continue
+                if final_url and final_url != url:
+                    return final_url
+        finally:
+            if created:
+                await session.close()
+        return None
+
+    async def resolve_short_url(self, url: str) -> Optional[str]:
+        """把 b23.tv 等短链解析成真实的 B 站链接；非短链原样返回。"""
+        if not self._is_short_url(url):
+            return url
+
+        headers = self._bili_headers()
+        current = url
+        for _ in range(3):
+            final_url = await self._resolve_once(current, headers)
+            if not final_url or final_url == current:
+                break
+            current = final_url
+            if not self._is_short_url(current):
+                logger.info(f"[短链] {url} -> {current}")
+                return current
+
+        # 网络解析失败时，b23.tv/BVxxx、b23.tv/avxxx 这类短链本身已带视频 ID，直接兜底
+        m = re.search(r'/(BV[0-9A-Za-z]{10})', url)
+        if m:
+            logger.warning(f"[短链] 跳转解析失败，按路径提取视频 ID: {m.group(1)}")
+            return m.group(1)
+        m = re.search(r'/(av\d+)', url, re.I)
+        if m:
+            logger.warning(f"[短链] 跳转解析失败，按路径提取视频 ID: {m.group(1)}")
+            return m.group(1).lower()
+
+        logger.warning(f"[短链] 解析失败，未获取到跳转地址: {url}")
         return None
 
     def detect_input_type(self, text: str) -> dict:
@@ -477,6 +550,14 @@ class SaveAnyBilibiliDownloader(Star):
             return ""
 
     async def download_and_send(self, event: AstrMessageEvent, url_or_bvid: str):
+        # /saveany 命令和 @ 触发都会走到这里，统一先处理短链
+        url_or_bvid = await self.resolve_short_url(url_or_bvid)
+        if not url_or_bvid:
+            await event.send(
+                event.plain_result("短链解析失败，请检查链接是否有效或稍后重试。")
+            )
+            return
+
         info = self.detect_input_type(url_or_bvid)
         if info["type"] == "unknown":
             await event.send(event.plain_result("无法识别的链接类型。"))

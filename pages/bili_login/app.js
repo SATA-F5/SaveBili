@@ -36,7 +36,7 @@ createApp({
         // Cookie 列表
         const cookies = ref([]);
         // 配置
-        const configForm = reactive({ download_dir: '', max_size_mb: 200, bot_qq: '', quality: 80 });
+        const configForm = reactive({ download_dir: '', max_size_mb: 200, quality: 80 });
         const configLoading = ref(false);
         const apiGet = (path, params) => bridge.apiGet(path, params);
         const apiPost = (path, data) => bridge.apiPost(path, data);
@@ -197,7 +197,6 @@ createApp({
             if (data.success) {
                 configForm.download_dir = data.config.download_dir;
                 configForm.max_size_mb = data.config.max_size_mb;
-                configForm.bot_qq = data.config.bot_qq;
                 configForm.quality = data.config.quality;
             }
         };
@@ -207,7 +206,6 @@ createApp({
                 const data = await apiPost('api/config/update', {
                     download_dir: configForm.download_dir,
                     max_size_mb: configForm.max_size_mb,
-                    bot_qq: configForm.bot_qq,
                     quality: configForm.quality,
                 });
                 if (data.success) {

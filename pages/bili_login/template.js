@@ -81,8 +81,6 @@ export const TEMPLATE = `
                 <input v-model="configForm.download_dir" type="text">
                 <label>最大文件大小 (MB)</label>
                 <input v-model="configForm.max_size_mb" type="number" min="1">
-                <label>机器人 QQ</label>
-                <input v-model="configForm.bot_qq" type="text" placeholder="留空自动识别">
                 <label>画质代码</label>
                 <input v-model="configForm.quality" type="number" min="1">
                 <button @click="saveConfig" :disabled="configLoading">{{ configLoading ? '保存中...' : '保存配置' }}</button>

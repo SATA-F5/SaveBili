@@ -213,7 +213,6 @@ class PluginAPI:
             "config": {
                 "download_dir": self.plugin.download_dir,
                 "max_size_mb": self.plugin.max_size_mb,
-                "bot_qq": self.plugin.bot_qq,
                 "quality": self.plugin.quality,
             }
         })
@@ -226,8 +225,6 @@ class PluginAPI:
             self.plugin.download_dir = str(data["download_dir"]).strip()
         if "max_size_mb" in data:
             self.plugin.max_size_mb = float(data["max_size_mb"])
-        if "bot_qq" in data:
-            self.plugin.bot_qq = str(data["bot_qq"]).strip()
         if "quality" in data:
             self.plugin.quality = int(data["quality"])
         self.plugin._save_plugin_config()
