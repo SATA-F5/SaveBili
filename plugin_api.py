@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import time
 from pathlib import Path
 
@@ -221,15 +222,21 @@ class PluginAPI:
         data = await request.get_json()
         if not data:
             return jsonify({"success": False, "error": "无数据"})
+        previous_dir = self.plugin.download_dir
         if "download_dir" in data:
-            self.plugin.download_dir = str(data["download_dir"]).strip()
+            self.plugin.download_dir = self.plugin._resolve_download_dir(data.get("download_dir"))
         if "max_size_mb" in data:
             self.plugin.max_size_mb = float(data["max_size_mb"])
         if "quality" in data:
             self.plugin.quality = int(data["quality"])
+        # 先确认目录可用再落盘，避免保存一个写不进去的路径
+        try:
+            os.makedirs(self.plugin.download_dir, exist_ok=True)
+        except Exception as e:
+            self.plugin.download_dir = previous_dir
+            logger.error(f"创建下载目录失败: {e}")
+            return jsonify({"success": False, "error": f"下载目录不可用: {e}"})
         self.plugin._save_plugin_config()
-        import os
-        os.makedirs(self.plugin.download_dir, exist_ok=True)
         return jsonify({"success": True})
 
     # ---------- FFmpeg 状态与下载 ----------

@@ -34,7 +34,7 @@ print(gk_art)
 
 @register("saveany_bilibili_downloader", "Shou_Lu",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
-          "1.3.5")
+          "1.2.0")
 class SaveAnyBilibiliDownloader(Star):
 
     # B 站短链域名（分享链接常见形式：https://b23.tv/xxxx）
@@ -74,6 +74,8 @@ class SaveAnyBilibiliDownloader(Star):
     FFMPEG_CONNECT_TIMEOUT = 8
     FFMPEG_READ_TIMEOUT = 30
     FFMPEG_TOTAL_TIMEOUT = 90
+    # 正常压缩包远大于该值；低于它说明拿到的是错误页或截断响应
+    FFMPEG_MIN_ARCHIVE_SIZE = 1024 * 1024
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -98,7 +100,8 @@ class SaveAnyBilibiliDownloader(Star):
 
         logger.info(f"[路径] 插件数据目录: {self.data_dir}")
 
-        self.download_dir = "./downloads"
+        # 默认落到插件数据目录下，便于数据迁移与审计（不再依赖进程工作目录）
+        self.download_dir = self._resolve_download_dir(None)
         self.max_size_mb = 2000.0
         self.quality = 80
         self.ffmpeg_path = None
@@ -106,7 +109,7 @@ class SaveAnyBilibiliDownloader(Star):
         self.ffmpeg_downloading = False
 
         if config:
-            self.download_dir = str(config.get("download_dir", self.download_dir))
+            self.download_dir = self._resolve_download_dir(config.get("download_dir"))
             self.max_size_mb = float(config.get("max_size_mb", self.max_size_mb))
             self.quality = int(config.get("quality", self.quality))
 
@@ -185,12 +188,27 @@ class SaveAnyBilibiliDownloader(Star):
         # 4. 全部失败 → 抛出，让 __init__ 的 fallback 接住
         raise RuntimeError(f"无法确定插件数据目录，最后的错误: {first_error}")
 
+    def _resolve_download_dir(self, value) -> str:
+        """把配置里的下载目录解析成绝对路径。
+
+        - 留空 → 插件数据目录下的 downloads
+        - 相对路径 → 统一挂到插件数据目录下，避免跟随进程工作目录漂移
+        - 绝对路径 / ~ 开头 → 原样展开
+        """
+        raw = str(value or "").strip()
+        if not raw:
+            return str(self.data_dir / "downloads")
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = self.data_dir / path
+        return str(path)
+
     def _load_plugin_config(self):
         cfg_file = self.data_dir / "plugin_config.json"
         if cfg_file.exists():
             try:
                 data = json.loads(cfg_file.read_text(encoding="utf-8"))
-                self.download_dir = str(data.get("download_dir", self.download_dir))
+                self.download_dir = self._resolve_download_dir(data.get("download_dir"))
                 self.max_size_mb = float(data.get("max_size_mb", self.max_size_mb))
                 self.quality = int(data.get("quality", self.quality))
             except Exception as e:
@@ -198,8 +216,13 @@ class SaveAnyBilibiliDownloader(Star):
 
     def _save_plugin_config(self):
         cfg_file = self.data_dir / "plugin_config.json"
+        # 数据目录内的路径按相对形式保存，整体迁移 data 目录后仍可用
+        try:
+            stored_dir = str(Path(self.download_dir).relative_to(self.data_dir))
+        except Exception:
+            stored_dir = self.download_dir
         data = {
-            "download_dir": self.download_dir,
+            "download_dir": stored_dir,
             "max_size_mb": self.max_size_mb,
             "quality": self.quality,
         }
@@ -256,7 +279,7 @@ class SaveAnyBilibiliDownloader(Star):
         except Exception as e:
             logger.warning(f"[初始化] 创建下载目录失败: {e}")
         self.plugin_api.register(self.context)
-        logger.info("B站下载插件已启动 (1.3.5 路径兼容版)")
+        logger.info(f"B站下载插件已启动 (1.2.0) 下载目录: {self.download_dir}")
         self._check_ffmpeg_local()
 
     async def trigger_ffmpeg_download(self):
@@ -280,47 +303,76 @@ class SaveAnyBilibiliDownloader(Star):
                     target_name = "ffmpeg"
                     extract_func = self._extract_tar
 
-                total_mirrors = len(self.FFMPEG_MIRROR_CANDIDATES)
+                # 官方源优先，失败后再走镜像；镜像仅作为网络受限时的备用通道
+                sources = [""] + list(self.FFMPEG_MIRROR_CANDIDATES)
+                total_sources = len(sources)
                 last_error = None
 
-                for idx, mirror in enumerate(self.FFMPEG_MIRROR_CANDIDATES, start=1):
-                    full_url = mirror + github_url
+                for idx, mirror in enumerate(sources, start=1):
+                    full_url = github_url if not mirror else mirror + github_url
+                    source_label = mirror or "GitHub 官方源"
                     self.ffmpeg_status = {
                         "status": "downloading",
-                        "message": f"[{idx}/{total_mirrors}] 正在通过 {mirror} 下载..."
+                        "message": f"[{idx}/{total_sources}] 正在通过 {source_label} 下载..."
                     }
-                    logger.info(f"[FFmpeg] [{idx}/{total_mirrors}] 尝试镜像: {mirror}")
+                    logger.info(f"[FFmpeg] [{idx}/{total_sources}] 尝试来源: {source_label}")
                     start_time = time.time()
                     try:
                         await asyncio.wait_for(
                             self._download_file_async(full_url, temp_file),
                             timeout=self.FFMPEG_TOTAL_TIMEOUT,
                         )
+                        # 拒绝空包 / 错误页 / 被截断的响应，避免把垃圾数据当二进制执行
+                        size = temp_file.stat().st_size if temp_file.exists() else 0
+                        if size < self.FFMPEG_MIN_ARCHIVE_SIZE:
+                            raise Exception(f"下载内容异常（仅 {size} 字节）")
                         elapsed = time.time() - start_time
-                        logger.info(f"[FFmpeg] 镜像 {mirror} 下载成功 ({elapsed:.1f}s)")
+                        logger.info(f"[FFmpeg] {source_label} 下载成功 ({elapsed:.1f}s, {size / 1048576:.1f} MB)")
                         break
                     except asyncio.TimeoutError:
                         elapsed = time.time() - start_time
                         last_error = f"超时 ({elapsed:.1f}s)"
-                        logger.warning(f"[FFmpeg] 镜像 {mirror} 超时，切换下一个")
+                        logger.warning(f"[FFmpeg] {source_label} 超时，切换下一个")
                     except Exception as e:
                         last_error = str(e)
-                        logger.warning(f"[FFmpeg] 镜像 {mirror} 失败: {e}")
+                        logger.warning(f"[FFmpeg] {source_label} 失败: {e}")
                     if temp_file.exists():
                         try:
                             temp_file.unlink()
                         except Exception:
                             pass
                 else:
-                    raise Exception(f"所有镜像均失败: {last_error}")
+                    raise Exception(f"所有来源均失败: {last_error}")
 
+                # 解压前后各校验一次：压缩包结构完整 + 二进制可正常执行
+                target_path = bin_dir / target_name
                 await asyncio.to_thread(extract_func, temp_file, bin_dir, target_name)
+                if os.name != 'nt':
+                    try:
+                        os.chmod(target_path, 0o755)
+                    except Exception:
+                        pass
+                if not target_path.exists():
+                    raise Exception("解压完成但未找到可执行文件")
+                if not await self._verify_ffmpeg_binary(str(target_path)):
+                    try:
+                        target_path.unlink()
+                    except Exception:
+                        pass
+                    raise Exception("FFmpeg 校验失败（文件无法执行或内容不完整）")
                 self._check_ffmpeg_local()
                 if self.ffmpeg_status["status"] != "ready":
-                    raise Exception("解压完成但未找到可执行文件")
+                    raise Exception("FFmpeg 校验通过但未能加载")
+                logger.info("[FFmpeg] 二进制校验通过")
             except Exception as e:
                 logger.error(f"FFmpeg 下载失败: {e}")
                 self.ffmpeg_status = {"status": "error", "message": f"下载失败: {str(e)}"}
+                for leftover in (self.data_dir / "ffmpeg_temp.zip", self.data_dir / "ffmpeg_temp.tar.xz"):
+                    try:
+                        if leftover.exists():
+                            leftover.unlink()
+                    except Exception:
+                        pass
 
         asyncio.create_task(download_task())
 
@@ -340,11 +392,17 @@ class SaveAnyBilibiliDownloader(Star):
 
     def _extract_zip(self, temp_file, dest_dir, target_name):
         with zipfile.ZipFile(temp_file, 'r') as z:
+            # CRC 校验，避免使用下载过程中损坏或被替换的压缩包
+            if z.testzip() is not None:
+                raise RuntimeError("ZIP 压缩包 CRC 校验失败")
             for filename in z.namelist():
-                if filename.endswith(target_name):
+                # 只取 basename，不按归档内路径落盘，杜绝路径穿越
+                if os.path.basename(filename) == target_name:
                     with z.open(filename) as source, open(dest_dir / target_name, 'wb') as target:
                         shutil.copyfileobj(source, target)
                     break
+            else:
+                raise RuntimeError(f"压缩包中未找到 {target_name}")
         try:
             os.remove(temp_file)
         except Exception:
@@ -353,14 +411,40 @@ class SaveAnyBilibiliDownloader(Star):
     def _extract_tar(self, temp_file, dest_dir, target_name):
         with tarfile.open(temp_file, "r:xz") as tar:
             for member in tar.getmembers():
-                if member.name.endswith(target_name) and member.isfile():
-                    member.name = os.path.basename(member.name)
-                    tar.extract(member, path=dest_dir)
+                # 用 extractfile 读取流后写到固定目标名，不调用 tar.extract，
+                # 因而归档内的路径/符号链接既不会被创建也不会影响目标位置
+                if member.isfile() and os.path.basename(member.name) == target_name:
+                    source = tar.extractfile(member)
+                    if source is None:
+                        raise RuntimeError(f"无法读取归档成员 {member.name}")
+                    with source, open(dest_dir / target_name, 'wb') as target:
+                        shutil.copyfileobj(source, target)
                     break
+            else:
+                raise RuntimeError(f"压缩包中未找到 {target_name}")
         try:
             os.remove(temp_file)
         except Exception:
             pass
+
+    async def _verify_ffmpeg_binary(self, ffmpeg_path: Optional[str]) -> bool:
+        """实际执行一次 `ffmpeg -version`，确认文件是可用且完整的 ffmpeg。"""
+        if not ffmpeg_path:
+            return False
+        try:
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    ffmpeg_path, "-version",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                ),
+                timeout=15,
+            )
+            stdout, _ = await proc.communicate()
+            return proc.returncode == 0 and b"ffmpeg version" in (stdout or b"").lower()
+        except Exception as e:
+            logger.warning(f"[FFmpeg] 校验执行失败: {e}")
+            return False
 
     async def _merge_with_ffmpeg(self, video_path: Path, audio_path: Path, output_path: Path):
         ffmpeg = self.find_ffmpeg()

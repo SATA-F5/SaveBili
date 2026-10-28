@@ -1,8 +1,8 @@
 {
   "download_dir": {
     "type": "string",
-    "description": "视频下载保存目录",
-    "default": "./downloads"
+    "description": "视频下载保存目录（留空则使用插件数据目录下的 downloads；相对路径同样基于插件数据目录）",
+    "default": ""
   },
   "max_size_mb": {
     "type": "float",
