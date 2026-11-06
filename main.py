@@ -32,9 +32,10 @@ gk_art = r"""//       ________ __    _____    __                  __   _
 print(gk_art)
 
 
-@register("saveany_bilibili_downloader", "Shou_Lu",
+@register("saveany_bilibili_downloader", "SATA-F5",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
-          "1.2.0")
+          "1.2.1",
+          "https://github.com/SATA-F5/SaveBili")
 class SaveAnyBilibiliDownloader(Star):
 
     # B 站短链域名（分享链接常见形式：https://b23.tv/xxxx）
@@ -120,7 +121,6 @@ class SaveAnyBilibiliDownloader(Star):
 
         self.session = None
         self.plugin_api = PluginAPI(self)
-        self._tasks = set()
         self._recent_requests = {}
 
     # ============ 核心修复：路径探测 ============
@@ -279,7 +279,7 @@ class SaveAnyBilibiliDownloader(Star):
         except Exception as e:
             logger.warning(f"[初始化] 创建下载目录失败: {e}")
         self.plugin_api.register(self.context)
-        logger.info(f"B站下载插件已启动 (1.2.0) 下载目录: {self.download_dir}")
+        logger.info(f"B站下载插件已启动 (1.2.1) 下载目录: {self.download_dir}")
         self._check_ffmpeg_local()
 
     async def trigger_ffmpeg_download(self):
@@ -463,9 +463,11 @@ class SaveAnyBilibiliDownloader(Star):
     @filter.command("saveany")
     async def saveany(self, event: AstrMessageEvent, url: str):
         if not url:
-            await event.send(event.plain_result("请提供一个 B 站链接或 BV 号。"))
+            yield event.plain_result("请提供一个 B 站链接或 BV 号。")
             return
-        await self.download_and_send(event, url)
+        event.stop_event()
+        async for result in self._handle_request(event, url):
+            yield result
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -481,7 +483,8 @@ class SaveAnyBilibiliDownloader(Star):
         if not url_or_bvid:
             return
         event.stop_event()
-        await self.download_and_send(event, url_or_bvid)
+        async for result in self._handle_request(event, url_or_bvid):
+            yield result
 
     def extract_bvid_or_url(self, text: str) -> Optional[str]:
         match = self.BILI_URL_PATTERN.search(text)
@@ -612,141 +615,154 @@ class SaveAnyBilibiliDownloader(Star):
     def build_bangumi_notify(self, info: dict, ep_title: str, index: str) -> str:
         return f"正在下载番剧：\n{info.get('title', '未知')}\n集数：{index} / 共 {len(info.get('episodes', []))} 集\n\n本集标题：{ep_title or '（无标题）'}\n简介：{self._format_desc(info.get('desc'))}"
 
-    async def _fetch_cover_to_temp(self, url: str) -> str:
-        if not url: return ""
-        url = "https:" + url if url.startswith("//") else url
-        try:
-            suffix = ".jpg"
-            for ext in (".png", ".gif", ".webp", ".jpeg"):
-                if ext in url.lower(): suffix = ext; break
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-            async def fetch():
-                async with self.session.get(url, headers=self._bili_headers()) as resp:
-                    if resp.status == 200:
-                        tmp.write(await resp.read())
-                        return True
-                    return False
-            success = await asyncio.wait_for(fetch(), timeout=10.0)
-            tmp.close()
-            return tmp.name if success else ""
-        except Exception as e:
-            logger.warning(f"封面下载失败: {e}")
+    @staticmethod
+    def _normalize_image_url(url: str) -> str:
+        if not url:
             return ""
+        if url.startswith("//"):
+            return "https:" + url
+        if url.startswith(("http://", "https://")):
+            return url
+        return "https://" + url
 
-    async def download_and_send(self, event: AstrMessageEvent, url_or_bvid: str):
+    def _result(self, event: AstrMessageEvent, text: str = "", cover_url: str = "", images=None):
+        """把文案与图片合并成一条消息链。
+
+        模仿 bili_resolver 的发送方式：连续文本只生成一个 Plain 段，图片统一用 URL 引用，
+        既不会把同一段内容拆成多条消息，也不必为封面落临时文件。
+        """
+        chain = []
+        cover = self._image_component(self._normalize_image_url(cover_url))
+        if cover is not None:
+            chain.append(cover)
+        for img in images or []:
+            comp = self._image_component(self._normalize_image_url(img))
+            if comp is not None:
+                chain.append(comp)
+        if text:
+            chain.append(Comp.Plain(text))
+        if not chain:
+            return None
+        if len(chain) == 1 and text:
+            return event.plain_result(text)
+        return event.chain_result(chain)
+
+    @staticmethod
+    def _image_component(url: str):
+        """URL 不合法时跳过图片而不是让整条消息发送失败。"""
+        if not url:
+            return None
+        try:
+            return Comp.Image.fromURL(url)
+        except Exception:
+            logger.warning(f"[消息] 封面地址无效，已跳过: {url}")
+            return None
+
+    async def _handle_request(self, event: AstrMessageEvent, url_or_bvid: str):
+        """解析输入并逐个产出待发送的消息，由 AstrBot 负责实际发送。"""
         # /saveany 命令和 @ 触发都会走到这里，统一先处理短链
         url_or_bvid = await self.resolve_short_url(url_or_bvid)
         if not url_or_bvid:
-            await event.send(
-                event.plain_result("短链解析失败，请检查链接是否有效或稍后重试。")
-            )
+            yield event.plain_result("短链解析失败，请检查链接是否有效或稍后重试。")
             return
 
         info = self.detect_input_type(url_or_bvid)
         if info["type"] == "unknown":
-            await event.send(event.plain_result("无法识别的链接类型。"))
+            yield event.plain_result("无法识别的链接类型。")
             return
 
         session_id = getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", "default")
         key = (str(session_id), url_or_bvid.strip())
         now = time.time()
-        last = self._recent_requests.get(key, 0)
-        if now - last < 10:
+        if now - self._recent_requests.get(key, 0) < 10:
             logger.warning(f"检测到 10 秒内重复请求，已忽略: {url_or_bvid}")
+            yield event.plain_result("刚刚已处理过同一链接，请稍后再试。")
             return
         self._recent_requests[key] = now
 
-        type_name = {"video": "视频", "bangumi": "番剧", "article": "专栏", "opus": "动态", "favlist": "收藏夹", "collection": "合集"}.get(info["type"], "内容")
-        await event.send(event.plain_result(f"已接收您的{type_name}请求，正在后台解析和下载，请稍候..."))
+        async for result in self._dispatch(event, info):
+            yield result
 
-        task = asyncio.create_task(self._background_download(event, info))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+    async def _dispatch(self, event: AstrMessageEvent, info: dict):
+        handlers = {
+            "video": self._handle_video,
+            "bangumi": self._handle_bangumi,
+            "article": self._handle_article,
+            "opus": self._handle_opus,
+            "favlist": lambda e, i: self._handle_list(e, "favlist", i),
+            "collection": lambda e, i: self._handle_list(e, "collection", i, info.get("mid", "")),
+        }
+        handler = handlers.get(info["type"])
+        if handler is None:
+            yield event.plain_result("暂不支持该类型的链接。")
+            return
 
-    async def _background_download(self, event: AstrMessageEvent, info: dict):
+        logger.info(f"开始处理: type={info['type']}, id={info.get('id')}")
         try:
-            t = info["type"]
-            logger.info(f"后台任务开始处理: type={t}, id={info.get('id')}")
-            handlers = {
-                "video": self._handle_video, "bangumi": self._handle_bangumi,
-                "article": self._handle_article, "opus": self._handle_opus,
-                "favlist": lambda e, i: self._handle_list(e, "favlist", i),
-                "collection": lambda e, i: self._handle_list(e, "collection", i, info.get("mid", ""))
-            }
-            await handlers[t](event, info["id"])
-        except Exception as e:
-            logger.error(f"后台下载任务出错: {traceback.format_exc()}")
-            await event.send(event.plain_result(f"下载过程中发生未捕获错误: {str(e)}"))
+            async for result in handler(event, info["id"]):
+                if result is not None:
+                    yield result
+        except Exception:
+            logger.error(f"处理 {info['type']} 失败: {traceback.format_exc()}")
+            yield event.plain_result("处理过程中发生错误，请查看控制台日志。")
 
     async def _handle_video(self, event, bvid):
         info = await self.get_bilibili_video_info(bvid)
         if not info:
-            await event.send(event.plain_result("获取视频信息失败，请查看控制台日志。"))
+            yield event.plain_result("获取视频信息失败，请查看控制台日志。")
             return
 
-        notify_text = self.build_video_notify(info)
-        cover_path = ""
-        if info.get("pic"):
-            cover_path = await self._fetch_cover_to_temp(info["pic"])
-
-        if cover_path:
-            await event.send(event.chain_result([
-                Comp.Image.fromFileSystem(path=cover_path),
-                Comp.Plain(notify_text),
-            ]))
-        else:
-            await event.send(event.plain_result(notify_text))
+        # 封面 + 文案合并成一条消息
+        card = self._result(event, self.build_video_notify(info), info.get("pic"))
+        if card is not None:
+            yield card
 
         url = await self.get_download_url(bvid, info.get("aid"), info.get("cid"))
         if not url:
-            await event.send(event.plain_result("获取下载地址失败，请查看控制台日志。"))
+            yield event.plain_result("获取下载地址失败，请查看控制台日志。")
             return
         path = await self.download_file(url, info["title"], None)
         if path and os.path.exists(path):
-            await event.send(event.chain_result([Comp.Video.fromFileSystem(path=path)]))
+            yield event.chain_result([Comp.Video.fromFileSystem(path=path)])
         else:
-            await event.send(event.plain_result("下载失败，可能文件过大或网络问题。"))
+            yield event.plain_result("下载失败，可能文件过大或网络问题。")
 
     async def _handle_bangumi(self, event, ep_or_ss):
         bangumi = await self.get_bangumi_info(ep_or_ss)
         if not bangumi:
-            await event.send(event.plain_result("番剧信息获取失败，请查看控制台日志。"))
+            yield event.plain_result("番剧信息获取失败，请查看控制台日志。")
             return
-        episodes = bangumi.get("episodes", [])
+        all_episodes = bangumi.get("episodes", [])
+        episodes = all_episodes
         if ep_or_ss.startswith("ep"):
             episodes = [e for e in episodes if e.get("ep_id") == int(ep_or_ss[2:])]
         if not episodes:
-            await event.send(event.plain_result("未找到可下载的剧集。"))
+            yield event.plain_result("未找到可下载的剧集。")
             return
-        if ep_or_ss.startswith("ss") and len(episodes) > 1:
-            await event.send(event.plain_result(f"检测到整季共 {len(episodes)} 集，仅下载第 1 集。"))
+        # 整季请求只下一集，提示语并入信息卡片，不再单独发一条消息
+        only_first = ep_or_ss.startswith("ss") and len(all_episodes) > 1
+        if only_first:
             episodes = episodes[:1]
 
         for ep in episodes:
-            notify_text = self.build_bangumi_notify(bangumi, ep.get('title'), ep.get('index'))
-            cover_path = ""
-            if bangumi.get("cover"):
-                cover_path = await self._fetch_cover_to_temp(bangumi["cover"])
-
-            if cover_path:
-                await event.send(event.chain_result([
-                    Comp.Image.fromFileSystem(path=cover_path),
-                    Comp.Plain(notify_text),
-                ]))
-            else:
-                await event.send(event.plain_result(notify_text))
+            text = self.build_bangumi_notify(bangumi, ep.get('title'), ep.get('index'))
+            if only_first:
+                text += f"\n\n（整季共 {len(all_episodes)} 集，仅下载第 1 集）"
+            card = self._result(event, text, bangumi.get("cover"))
+            if card is not None:
+                yield card
 
             streams = await self.get_bangumi_playurl(ep["ep_id"], ep["cid"])
             if not streams or not streams.get("video_url"):
-                await event.send(event.plain_result(f"第 {ep.get('index')} 集解析失败，请查看控制台输出。"))
+                yield event.plain_result(f"第 {ep.get('index')} 集解析失败，请查看控制台输出。")
                 continue
 
             title = f"{bangumi['title']} - {ep.get('index')} {ep.get('title')}".strip()
             path = await self.download_file(streams["video_url"], title, streams.get("audio_url"))
             if path and os.path.exists(path):
-                await event.send(event.chain_result([Comp.Video.fromFileSystem(path=path)]))
+                yield event.chain_result([Comp.Video.fromFileSystem(path=path)])
             else:
-                await event.send(event.plain_result(f"第 {ep.get('index')} 集下载失败。"))
+                yield event.plain_result(f"第 {ep.get('index')} 集下载失败。")
 
     async def get_bilibili_video_info(self, bvid: str) -> dict:
         api_url = f"https://api.bilibili.com/x/web-interface/view?{'aid' if bvid.lower().startswith('av') else 'bvid'}={bvid[2:] if bvid.lower().startswith('av') else bvid}"
@@ -930,17 +946,20 @@ class SaveAnyBilibiliDownloader(Star):
             d = data.get("data") or data.get("result")
             if data.get("code") != 0 or not d:
                 logger.error(f"专栏 API 错误: code={data.get('code')}")
-                await event.send(event.plain_result("专栏获取失败，请查看控制台日志。"))
+                yield event.plain_result("专栏获取失败，请查看控制台日志。")
                 return
-            await event.send(event.plain_result(f"正在获取专栏：\n{d.get('title')}\n作者：{d.get('author', {}).get('name')}\n摘要：{self._format_desc(d.get('summary'))}"))
             text = self._html_to_text(d.get("content", ""))
             txt_path = os.path.join(self.download_dir, f"{re.sub(r'[\\\\/*?:\"<>|]', '_', d.get('title', 'article'))[:80]}.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(f"{d.get('title')}\n作者：{d.get('author', {}).get('name')}\n链接：https://www.bilibili.com/read/cv{article_id}\n\n{text}")
-            await event.send(event.plain_result(f"专栏正文已保存至：{txt_path}"))
+            # 标题、摘要与保存结果合成一条消息
+            yield event.plain_result(
+                f"专栏：{d.get('title')}\n作者：{d.get('author', {}).get('name')}\n"
+                f"摘要：{self._format_desc(d.get('summary'))}\n\n正文已保存至：{txt_path}"
+            )
         except Exception as e:
             logger.error(f"专栏处理异常: {traceback.format_exc()}")
-            await event.send(event.plain_result("专栏处理失败，请查看控制台日志。"))
+            yield event.plain_result("专栏处理失败，请查看控制台日志。")
 
     async def _handle_opus(self, event, dynamic_id):
         url = f"https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?timezone_offset=-480&id={dynamic_id}"
@@ -953,27 +972,32 @@ class SaveAnyBilibiliDownloader(Star):
             item = data.get("data", {}).get("item") if data.get("code") == 0 else None
             if not item:
                 logger.error(f"动态 API 错误: raw={raw_text}")
-                await event.send(event.plain_result("动态获取失败，请查看控制台日志。"))
+                yield event.plain_result("动态获取失败，请查看控制台日志。")
                 return
             major = item.get("modules", {}).get("module_dynamic", {}).get("major") or {}
             archive = major.get("archive")
             if archive and archive.get("bvid"):
-                await event.send(event.plain_result("检测到视频动态，正在下载视频..."))
-                await self._handle_video(event, archive["bvid"]); return
+                async for result in self._handle_video(event, archive["bvid"]):
+                    if result is not None:
+                        yield result
+                return
             text = item.get("modules", {}).get("module_dynamic", {}).get("desc", {}).get("text", "")
-            await event.send(event.plain_result(f"动态内容：\n{text or '（无文字）'}"))
-            for it in (major.get("draw", {}) or {}).get("items", []):
-                img = await self._fetch_cover_to_temp(it.get("src"))
-                if img: await event.send(event.chain_result([Comp.Image.fromFileSystem(path=img)]))
+            images = [it.get("src") for it in (major.get("draw", {}) or {}).get("items", [])]
+            # 文案与全部配图放进同一条消息，避免一张图一条消息
+            card = self._result(event, f"动态内容：\n{text or '（无文字）'}", images=images)
+            if card is not None:
+                yield card
         except Exception as e:
             logger.error(f"动态处理异常: {traceback.format_exc()}")
-            await event.send(event.plain_result("动态处理失败，请查看控制台日志。"))
+            yield event.plain_result("动态处理失败，请查看控制台日志。")
 
     async def _handle_list(self, event, kind: str, list_id: str, mid: str = ""):
         if kind == "favlist":
             url = f"https://api.bilibili.com/x/v3/fav/resource/list?media_id={list_id}&pn=1&ps=20&platform=web"
         else:
-            if not mid: await event.send(event.plain_result("缺少 mid 参数。")); return
+            if not mid:
+                yield event.plain_result("缺少 mid 参数。")
+                return
             url = f"https://api.bilibili.com/x/polymer/web-space/seasons_archives_list?mid={mid}&season_id={list_id}&page_num=1&page_size=30"
         try:
             async def fetch():
@@ -984,13 +1008,13 @@ class SaveAnyBilibiliDownloader(Star):
             d = data.get("data") or data.get("result")
             if data.get("code") != 0 or not d:
                 logger.error(f"列表 API 错误: raw={raw_text}")
-                await event.send(event.plain_result("列表解析失败，请查看控制台日志。"))
+                yield event.plain_result("列表解析失败，请查看控制台日志。")
                 return
             items = [m for m in (d.get("medias") or d.get("archives") or []) if m.get("bvid")]
-            await event.send(event.plain_result(f"共获取到 {len(items)} 个视频。\n如需下载，请单独发送 BV 号。"))
+            yield event.plain_result(f"共获取到 {len(items)} 个视频。\n如需下载，请单独发送 BV 号。")
         except Exception as e:
             logger.error(f"列表处理异常: {traceback.format_exc()}")
-            await event.send(event.plain_result("列表处理失败，请查看控制台日志。"))
+            yield event.plain_result("列表处理失败，请查看控制台日志。")
 
     def _html_to_text(self, html: str) -> str:
         if not html: return ""

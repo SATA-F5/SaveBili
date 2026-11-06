@@ -1,7 +1,7 @@
 {
     "name": "astrbot_plugin_bili_downloader",
     "display_name": "SaveBili",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "author": "SATA-F5",
     "description": "B站下载插件",
     "main": "main.py",
