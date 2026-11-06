@@ -713,12 +713,17 @@ class SaveAnyBilibiliDownloader(Star):
 
     @filter.command("saveany")
     async def saveany(self, event: AstrMessageEvent, url: str):
-        if not url:
-            yield event.plain_result("请提供一个 B 站链接或 BV 号。")
-            return
-        event.stop_event()
-        async for result in self._handle_request(event, url):
-            yield result
+        # 注意：不能在第一个 yield 之前调用 event.stop_event()。
+        # AstrBot 的调度器检测到 is_stopped() 后会 break，不再恢复这个生成器，
+        # 于是 yield 之后的下载/发送全部不会执行（表现就是“卡住没反应”）。
+        try:
+            if not url:
+                yield event.plain_result("请提供一个 B 站链接或 BV 号。")
+                return
+            async for result in self._handle_request(event, url):
+                yield result
+        finally:
+            event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -733,9 +738,11 @@ class SaveAnyBilibiliDownloader(Star):
         url_or_bvid = self.extract_bvid_or_url(message)
         if not url_or_bvid:
             return
-        event.stop_event()
-        async for result in self._handle_request(event, url_or_bvid):
-            yield result
+        try:
+            async for result in self._handle_request(event, url_or_bvid):
+                yield result
+        finally:
+            event.stop_event()
 
     def extract_bvid_or_url(self, text: str) -> Optional[str]:
         match = self.BILI_URL_PATTERN.search(text)
