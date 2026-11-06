@@ -34,7 +34,7 @@ logger.info(gk_art)
 
 @register("astrbot_plugin_bili_downloader", "SATA-F5",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
-          "1.2.1",
+          "1.2.2",
           "https://github.com/SATA-F5/SaveBili")
 class SaveAnyBilibiliDownloader(Star):
 
@@ -568,7 +568,7 @@ class SaveAnyBilibiliDownloader(Star):
         except Exception as e:
             logger.warning(f"[初始化] 创建下载目录失败: {e}")
         self.plugin_api.register(self.context)
-        logger.info(f"B站下载插件已启动 (1.2.1) 下载目录: {self.download_dir}")
+        logger.info(f"B站下载插件已启动 (1.2.2) 下载目录: {self.download_dir}")
         # 探测是全异步的（create_subprocess_exec），不会阻塞事件循环
         await self._detect_ffmpeg()
 

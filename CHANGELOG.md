@@ -2,6 +2,34 @@
 
 本项目的重要变更记录在此文件中。
 
+## [1.2.2] - 2026-11-07
+
+多平台兼容、发送流程修复与审核合规整改。
+
+### 变更
+
+- FFmpeg 探测改为多路径：`PATH` → `/usr/bin`、`/usr/local/bin`、`/bin`、`/snap/bin`、`/opt/homebrew/bin` 等常见位置 → 用户目录 → 插件目录，并用 `-version` 实际校验。服务环境 PATH 被裁剪时也能识别系统自带的 ffmpeg，不再误判成"未安装"。
+- 新增「重新检测」按钮与 `POST /api/ffmpeg/check`；已就绪时隐藏「一键下载」，未就绪时给出对应平台的安装命令提示。
+- 自动下载按平台分流：Windows x64、Linux x64 / arm64 分别取对应构建；macOS 与其他系统不再错误地下载 Linux 二进制，改为提示用 `brew`/包管理器安装。
+- 文件名按 UTF-8 字节数截断（Linux 上限 255 字节），避免超长中文标题在 Ubuntu 上写文件失败。
+
+### 修复
+
+- 修复「发链接后卡住无反应」：原先在第一个 `yield` 之前调用 `event.stop_event()`，AstrBot 调度器检测到事件已终止后会 `break`，不再恢复该生成器，后续的下载与发送全部不执行。现在改为所有消息 `yield` 完毕后在 `finally` 里调用 `stop_event()`，并补充注释说明原因。
+- 修复 `sys.stdout.reconfigure` 在 `pythonw` / 重定向输出等环境下导入即报错的问题。
+
+### 合规
+
+按 AstrBot 插件市场审核规则逐条对齐：
+
+- 日志统一使用 `from astrbot.api import logger`，移除导入期的 `print`，不再触碰 `sys.stdout`。
+- 数据目录改用官方的 `StarTools.get_data_dir()`（`data/plugin_data/astrbot_plugin_bili_downloader`），并把旧目录 `saveany_bilibili_downloader` 的 `cookies.json` / `plugin_config.json` / `stats.json` 自动迁移一次。
+- FFmpeg 探测由同步 `subprocess.run` 改为 `asyncio.create_subprocess_exec`，`find_ffmpeg()` 改为异步，避免阻塞事件循环。
+- 扫码登录相关 HTTP 请求补上超时（`total=15/connect=8/sock_read=10`）。
+- 媒体下载仅对 `bilibili.com` 主域附带 Cookie，视频/图片 CDN 域名只带 Referer，避免凭据外发。
+- `cookies.json` 在 POSIX 下写入后收紧为 `0600`（迁移过来的文件同样处理）。
+- 注册名与 `metadata.yaml` / 目录名统一为 `astrbot_plugin_bili_downloader`。
+
 ## [1.2.1] - 2026-11-07
 
 对标 `astrbot_plugin_bili_resolver` 重做消息发送流程，并重做 WebUI。
@@ -18,28 +46,6 @@
 
 - 移除无用的账密登录：删除侧边栏入口、登录表单及 `/api/login/password` 占位接口。
 - WebUI 默认进入「数据概览」页。
-- FFmpeg 探测改为多路径：`PATH` → `/usr/bin`、`/usr/local/bin`、`/snap/bin`、`/opt/homebrew/bin` 等常见位置 → 用户目录 → 插件目录，并用 `-version` 实际校验。服务环境 PATH 被裁剪时也能识别系统自带的 ffmpeg，不再误判成"未安装"。
-- 新增「重新检测」按钮与 `POST /api/ffmpeg/check`；已就绪时隐藏「一键下载」，并给出对应平台的安装命令提示。
-- 自动下载按平台分流：Windows x64、Linux x64 / arm64 分别取对应构建；macOS 与其他系统不再错误地下载 Linux 二进制，改为提示用 `brew`/包管理器安装。
-- 文件名按 UTF-8 字节数截断（Linux 上限 255 字节），避免超长中文标题在 Ubuntu 上写文件失败。
-- `sys.stdout.reconfigure` 加保护，`pythonw` / 重定向输出等环境下导入不再报错。
-
-### 修复
-
-- 修复「发链接后卡住无反应」：原先在第一个 `yield` 之前调用 `event.stop_event()`，AstrBot 调度器检测到事件已终止后会 `break`，不再恢复该生成器，后续的下载与发送全部不执行。现在改为所有消息 `yield` 完毕后在 `finally` 里调用 `stop_event()`，并补充注释说明原因。
-
-### 合规
-
-按 AstrBot 插件市场审核规则逐条对齐：
-
-- 日志统一使用 `from astrbot.api import logger`，移除导入期的 `print`，不再触碰 `sys.stdout`。
-- 数据目录改用官方的 `StarTools.get_data_dir()`（`data/plugin_data/astrbot_plugin_bili_downloader`），并把旧目录 `saveany_bilibili_downloader` 的 `cookies.json` / `plugin_config.json` / `stats.json` 自动迁移一次。
-- FFmpeg 探测由同步 `subprocess.run` 改为 `asyncio.create_subprocess_exec`，`find_ffmpeg()` 改为异步，避免阻塞事件循环。
-- 扫码登录相关 HTTP 请求补上超时（`total=15/connect=8/sock_read=10`）。
-- 媒体下载仅对 `bilibili.com` 主域附带 Cookie，视频/图片 CDN 域名只带 Referer，避免凭据外发。
-- `cookies.json` 在 POSIX 下写入后收紧为 `0600`（迁移过来的文件同样处理）。
-- 注册名与 `metadata.yaml` / 目录名统一为 `astrbot_plugin_bili_downloader`。
-
 - 所有指令/事件处理器改为生成器，用 `yield event.plain_result()` / `yield event.chain_result()` 交给 AstrBot 发送，不再在后台任务里调用 `event.send()`，消息顺序与失败重试由框架统一处理。
 - 去掉「已接收您的请求」这条独立提示，文案与封面合并为一张信息卡片，减少一条消息。
 - 前文与图片合并进同一条消息链：视频/番剧卡片（封面 + 文案）、动态正文与全部配图都只发一条。
