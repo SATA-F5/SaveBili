@@ -1,16 +1,41 @@
 import { TEMPLATE } from './template.js';
 const { createApp, ref, reactive, onMounted, onUnmounted, computed } = Vue;
+
+const TYPE_LABELS = {
+    video: '视频',
+    bangumi: '番剧',
+    article: '专栏',
+    opus: '动态',
+    favlist: '收藏夹',
+    collection: '合集',
+};
+
+const emptyStats = () => ({
+    totals: { count: 0, success: 0, failed: 0, bytes: 0 },
+    today: { count: 0, success: 0, failed: 0, bytes: 0 },
+    days: [],
+    types: {},
+    recent: [],
+    success_rate: 0,
+    storage: { files: 0, bytes: 0 },
+    cookies: { enabled: 0, total: 0 },
+});
+
 createApp({
     setup() {
         const bridge = window.AstrBotPluginPage;
-        const activeSection = ref('qrcode'); // qrcode | password | cookie-input | cookie-manage | config
-        const statusText = ref('');
+        const activeSection = ref('dashboard'); // dashboard | qrcode | cookie-input | cookie-manage | config
+        const statusText = ref('数据每 30 秒自动刷新');
         const hasCookie = ref(false);
         const isLoading = ref(false);
         const showClearConfirm = ref(false);
         const clearTargetIndex = ref(null);
         const showClearAllConfirm = ref(false);
-        
+
+        // 数据概览
+        const stats = ref(emptyStats());
+        const statsLoading = ref(false);
+
         // FFmpeg 状态
         const ffmpegStatus = ref({ status: 'idle', message: '尚未检测 FFmpeg' });
 
@@ -27,10 +52,7 @@ createApp({
         // 扫码
         const qrUrl = ref('');
         let pollTimer = null;
-        // 账密
-        const showPasswordLogin = ref(false);
-        const passwordForm = reactive({ username: '', password: '' });
-        const passwordLoading = ref(false);
+        let statsTimer = null;
         // Cookie 输入
         const manualCookie = reactive({ cookie: '', remark: '', priority: 10, enabled: true });
         // Cookie 列表
@@ -40,6 +62,68 @@ createApp({
         const configLoading = ref(false);
         const apiGet = (path, params) => bridge.apiGet(path, params);
         const apiPost = (path, data) => bridge.apiPost(path, data);
+
+        // ---------- 格式化 & 图表 ----------
+        const formatBytes = (bytes) => {
+            const n = Number(bytes) || 0;
+            if (n < 1024) return n + ' B';
+            const units = ['KB', 'MB', 'GB', 'TB'];
+            let value = n;
+            let idx = -1;
+            do {
+                value /= 1024;
+                idx += 1;
+            } while (value >= 1024 && idx < units.length - 1);
+            return value.toFixed(value >= 10 ? 0 : 1) + ' ' + units[idx];
+        };
+        const formatTime = (ts) => {
+            if (!ts) return '-';
+            const d = new Date(ts * 1000);
+            const pad = (x) => String(x).padStart(2, '0');
+            return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+        };
+        const typeLabel = (key) => TYPE_LABELS[key] || key || '其他';
+        const typeRows = computed(() => {
+            const entries = Object.entries(stats.value.types || {})
+                .filter(([, count]) => Number(count) > 0)
+                .sort((a, b) => b[1] - a[1]);
+            const max = entries.length ? entries[0][1] : 1;
+            return entries.map(([key, count]) => ({
+                key,
+                label: typeLabel(key),
+                count,
+                pct: Math.max(6, Math.round((count / max) * 100)),
+            }));
+        });
+        const maxDayCount = computed(() => {
+            const counts = (stats.value.days || []).map((d) => Number(d.count) || 0);
+            return Math.max(1, ...counts);
+        });
+        const barHeight = (count) => {
+            const c = Number(count) || 0;
+            if (c === 0) return '3%';
+            return Math.max(8, Math.round((c / maxDayCount.value) * 100)) + '%';
+        };
+
+        // ---------- 数据概览 ----------
+        const loadStats = async () => {
+            try {
+                const data = await apiGet('api/stats');
+                if (data && data.success && data.stats) {
+                    stats.value = Object.assign(emptyStats(), data.stats);
+                }
+            } catch (e) { console.error(e); }
+        };
+        const refreshStats = async () => {
+            statsLoading.value = true;
+            try {
+                await loadStats();
+                statusText.value = '数据已刷新';
+            } finally {
+                statsLoading.value = false;
+            }
+        };
+
         // 状态加载
         const loadStatus = async () => {
             try {
@@ -80,32 +164,10 @@ createApp({
                         showToast('登录成功');
                         clearInterval(pollTimer);
                         pollTimer = null;
+                        await loadStats();
                     }
                 } catch (e) { console.error(e); }
             }, 3000);
-        };
-        // 账密
-        const submitPasswordLogin = async () => {
-            if (!passwordForm.username || !passwordForm.password) {
-                statusText.value = '请输入用户名和密码';
-                return;
-            }
-            passwordLoading.value = true;
-            statusText.value = '正在登录...';
-            try {
-                const data = await apiPost('api/login/password', passwordForm);
-                if (data.success) {
-                    statusText.value = '登录成功！Cookie 已保存';
-                    showToast('登录成功');
-                    await loadStatus();
-                } else {
-                    statusText.value = '登录失败：' + (data.error || '未知错误');
-                }
-            } catch (e) {
-                statusText.value = '请求异常：' + e.message;
-            } finally {
-                passwordLoading.value = false;
-            }
         };
         // 手动添加 Cookie
         const addManualCookie = async () => {
@@ -128,6 +190,7 @@ createApp({
                     manualCookie.priority = 10;
                     manualCookie.enabled = true;
                     await loadStatus();
+                    await loadStats();
                 } else {
                     statusText.value = '添加失败：' + (data.error || '未知错误');
                 }
@@ -144,6 +207,7 @@ createApp({
             });
             if (data.success) {
                 await loadStatus();
+                await loadStats();
                 showToast(c.enabled ? '已禁用该 Cookie' : '已启用该 Cookie');
             }
         };
@@ -170,6 +234,7 @@ createApp({
                 showToast('Cookie 已删除');
                 clearTargetIndex.value = null;
                 await loadStatus();
+                await loadStats();
             }
         };
         const cancelDeleteCookie = () => {
@@ -186,6 +251,7 @@ createApp({
                 statusText.value = '所有 Cookie 已清除';
                 showToast('所有 Cookie 已清除');
                 await loadStatus();
+                await loadStats();
             }
         };
         const cancelClearAll = () => {
@@ -211,6 +277,7 @@ createApp({
                 if (data.success) {
                     statusText.value = '配置已保存';
                     showToast('配置已保存');
+                    await loadStats();
                 } else {
                     statusText.value = '保存失败：' + (data.error || '未知错误');
                 }
@@ -220,8 +287,8 @@ createApp({
                 configLoading.value = false;
             }
         };
-        
-        // ---------- FFmpeg 下载逻辑 ----------
+
+        // ---------- FFmpeg ----------
         const loadFFmpegStatus = async () => {
             try {
                 const data = await apiGet('api/ffmpeg/status');
@@ -243,6 +310,7 @@ createApp({
                             clearInterval(timer);
                             if (ffmpegStatus.value.status === 'ready') showToast('FFmpeg 配置成功');
                             else showToast('下载失败，请查看日志');
+                            await loadStats();
                         }
                     }, 3000);
                 } else {
@@ -256,9 +324,8 @@ createApp({
         };
 
         onMounted(async () => {
-            await loadStatus();
-            await loadConfig();
-            await loadFFmpegStatus();
+            await Promise.all([loadStatus(), loadConfig(), loadFFmpegStatus(), loadStats()]);
+            statsTimer = setInterval(loadStats, 30000);
             if (cookies.value.length === 0) {
                 activeSection.value = 'qrcode';
                 await generateQR();
@@ -267,15 +334,13 @@ createApp({
         onUnmounted(() => {
             if (pollTimer) clearInterval(pollTimer);
             if (toastTimer) clearTimeout(toastTimer);
+            if (statsTimer) clearInterval(statsTimer);
         });
         return {
             activeSection,
             statusText,
             qrUrl,
             isLoading,
-            showPasswordLogin,
-            passwordForm,
-            passwordLoading,
             manualCookie,
             cookies,
             configForm,
@@ -285,8 +350,14 @@ createApp({
             toastMessage,
             toastVisible,
             ffmpegStatus,
+            stats,
+            statsLoading,
+            typeRows,
+            barHeight,
+            formatBytes,
+            formatTime,
+            typeLabel,
             generateQR,
-            submitPasswordLogin,
             addManualCookie,
             toggleCookie,
             updatePriority,
@@ -298,6 +369,7 @@ createApp({
             cancelClearAll,
             saveConfig,
             downloadFFmpeg,
+            refreshStats,
         };
     },
     template: TEMPLATE,

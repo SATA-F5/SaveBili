@@ -34,7 +34,7 @@ print(gk_art)
 
 @register("saveany_bilibili_downloader", "SATA-F5",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
-          "1.2.1",
+          "1.3.0",
           "https://github.com/SATA-F5/SaveBili")
 class SaveAnyBilibiliDownloader(Star):
 
@@ -118,6 +118,7 @@ class SaveAnyBilibiliDownloader(Star):
         self.cookies = []
         self.bilibili_cookie = ""
         self._load_cookies()
+        self.stats = self._load_stats()
 
         self.session = None
         self.plugin_api = PluginAPI(self)
@@ -247,6 +248,140 @@ class SaveAnyBilibiliDownloader(Star):
         enabled.sort(key=lambda x: x.get("priority", 100))
         self.bilibili_cookie = enabled[0]["cookie"] if enabled else ""
 
+    # ============ 下载统计（供 WebUI 可视化） ============
+    @staticmethod
+    def _empty_stats() -> dict:
+        return {
+            "totals": {"count": 0, "success": 0, "failed": 0, "bytes": 0},
+            "daily": {},
+            "types": {},
+            "recent": [],
+        }
+
+    @staticmethod
+    def _safe_int(value) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _load_stats(self) -> dict:
+        """读取统计文件，并对缺字段 / 类型错误的旧数据做兜底归一化。"""
+        stats_file = self.data_dir / "stats.json"
+        result = self._empty_stats()
+        if not stats_file.exists():
+            return result
+        try:
+            data = json.loads(stats_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.error(f"加载统计数据失败: {e}")
+            return result
+        if not isinstance(data, dict):
+            return result
+
+        totals = data.get("totals")
+        if isinstance(totals, dict):
+            for key in result["totals"]:
+                result["totals"][key] = self._safe_int(totals.get(key, 0))
+
+        daily = data.get("daily")
+        if isinstance(daily, dict):
+            for day_key, bucket in daily.items():
+                if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(day_key)) or not isinstance(bucket, dict):
+                    continue
+                result["daily"][day_key] = {
+                    "count": self._safe_int(bucket.get("count", 0)),
+                    "success": self._safe_int(bucket.get("success", 0)),
+                    "failed": self._safe_int(bucket.get("failed", 0)),
+                    "bytes": self._safe_int(bucket.get("bytes", 0)),
+                }
+
+        types = data.get("types")
+        if isinstance(types, dict):
+            for key, count in types.items():
+                value = self._safe_int(count)
+                if value:
+                    result["types"][str(key)] = value
+
+        recent = data.get("recent")
+        if isinstance(recent, list):
+            for item in recent[:30]:
+                if not isinstance(item, dict):
+                    continue
+                result["recent"].append({
+                    "ts": self._safe_int(item.get("ts", 0)),
+                    "type": str(item.get("type", "") or ""),
+                    "title": str(item.get("title", "") or "")[:80],
+                    "ok": bool(item.get("ok", False)),
+                    "bytes": self._safe_int(item.get("bytes", 0)),
+                })
+        return result
+
+    def _save_stats(self):
+        try:
+            stats_file = self.data_dir / "stats.json"
+            tmp_file = stats_file.with_name(stats_file.name + ".tmp")
+            tmp_file.write_text(json.dumps(self.stats, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_file, stats_file)
+        except Exception as e:
+            logger.warning(f"保存统计数据失败: {e}")
+
+    def record_download(self, kind: str, title: str, ok: bool, size: int = 0):
+        """记录一次下载结果（失败也计数，便于在 WebUI 看成功率）。"""
+        today = time.strftime("%Y-%m-%d")
+        day = self.stats["daily"].setdefault(today, {"count": 0, "success": 0, "failed": 0, "bytes": 0})
+        totals = self.stats["totals"]
+        for bucket in (day, totals):
+            bucket["count"] += 1
+            bucket["success" if ok else "failed"] += 1
+            if ok and size > 0:
+                bucket["bytes"] += int(size)
+        self.stats["types"][kind] = self.stats["types"].get(kind, 0) + 1
+        self.stats["recent"].insert(0, {
+            "ts": int(time.time()),
+            "type": kind,
+            "title": (title or "")[:80],
+            "ok": bool(ok),
+            "bytes": int(size) if ok else 0,
+        })
+        del self.stats["recent"][30:]
+        # 只保留最近 60 天，避免统计文件无限增长
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 60 * 86400))
+        for day_key in [k for k in self.stats["daily"] if k < cutoff]:
+            self.stats["daily"].pop(day_key, None)
+        self._save_stats()
+
+    def build_stats(self) -> dict:
+        totals = dict(self.stats["totals"])
+        today = self.stats["daily"].get(
+            time.strftime("%Y-%m-%d"), {"count": 0, "success": 0, "failed": 0, "bytes": 0}
+        )
+        days = []
+        for offset in range(6, -1, -1):
+            day_key = time.strftime("%Y-%m-%d", time.localtime(time.time() - offset * 86400))
+            day = self.stats["daily"].get(day_key, {})
+            days.append({
+                "date": day_key,
+                "label": day_key[5:],
+                "count": day.get("count", 0),
+                "success": day.get("success", 0),
+                "failed": day.get("failed", 0),
+                "bytes": day.get("bytes", 0),
+            })
+        return {
+            "totals": totals,
+            "today": today,
+            "days": days,
+            "types": self.stats["types"],
+            "recent": self.stats["recent"][:12],
+            "success_rate": round(totals["success"] / totals["count"] * 100, 1) if totals["count"] else 0,
+            "cookies": {
+                "total": len(self.cookies),
+                "enabled": sum(1 for c in self.cookies if c.get("enabled", True)),
+            },
+            "ffmpeg": self.ffmpeg_status,
+        }
+
     def _check_ffmpeg_local(self):
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
@@ -279,7 +414,7 @@ class SaveAnyBilibiliDownloader(Star):
         except Exception as e:
             logger.warning(f"[初始化] 创建下载目录失败: {e}")
         self.plugin_api.register(self.context)
-        logger.info(f"B站下载插件已启动 (1.2.1) 下载目录: {self.download_dir}")
+        logger.info(f"B站下载插件已启动 (1.3.0) 下载目录: {self.download_dir}")
         self._check_ffmpeg_local()
 
     async def trigger_ffmpeg_download(self):
@@ -722,7 +857,9 @@ class SaveAnyBilibiliDownloader(Star):
             yield event.plain_result("获取下载地址失败，请查看控制台日志。")
             return
         path = await self.download_file(url, info["title"], None)
-        if path and os.path.exists(path):
+        ok = bool(path and os.path.exists(path))
+        self.record_download("video", info["title"], ok, os.path.getsize(path) if ok else 0)
+        if ok:
             yield event.chain_result([Comp.Video.fromFileSystem(path=path)])
         else:
             yield event.plain_result("下载失败，可能文件过大或网络问题。")
@@ -759,7 +896,9 @@ class SaveAnyBilibiliDownloader(Star):
 
             title = f"{bangumi['title']} - {ep.get('index')} {ep.get('title')}".strip()
             path = await self.download_file(streams["video_url"], title, streams.get("audio_url"))
-            if path and os.path.exists(path):
+            ok = bool(path and os.path.exists(path))
+            self.record_download("bangumi", title, ok, os.path.getsize(path) if ok else 0)
+            if ok:
                 yield event.chain_result([Comp.Video.fromFileSystem(path=path)])
             else:
                 yield event.plain_result(f"第 {ep.get('index')} 集下载失败。")
@@ -952,6 +1091,7 @@ class SaveAnyBilibiliDownloader(Star):
             txt_path = os.path.join(self.download_dir, f"{re.sub(r'[\\\\/*?:\"<>|]', '_', d.get('title', 'article'))[:80]}.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(f"{d.get('title')}\n作者：{d.get('author', {}).get('name')}\n链接：https://www.bilibili.com/read/cv{article_id}\n\n{text}")
+            self.record_download("article", d.get("title"), True, os.path.getsize(txt_path))
             # 标题、摘要与保存结果合成一条消息
             yield event.plain_result(
                 f"专栏：{d.get('title')}\n作者：{d.get('author', {}).get('name')}\n"

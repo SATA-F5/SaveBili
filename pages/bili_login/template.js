@@ -10,34 +10,114 @@ export const TEMPLATE = `
 <div class="manager-container">
     <aside class="sidebar">
         <div class="sidebar-title">SaveBili</div>
+        <div class="nav-item" :class="{ active: activeSection === 'dashboard' }" @click="activeSection = 'dashboard'">数据概览</div>
         <div class="nav-item" :class="{ active: activeSection === 'qrcode' }" @click="activeSection = 'qrcode'">扫码登录</div>
-        <div class="nav-item" :class="{ active: activeSection === 'password' }" @click="activeSection = 'password'">账密登录</div>
         <div class="nav-item" :class="{ active: activeSection === 'cookie-input' }" @click="activeSection = 'cookie-input'">Cookie 输入</div>
         <div class="nav-item" :class="{ active: activeSection === 'cookie-manage' }" @click="activeSection = 'cookie-manage'">Cookie 管理</div>
         <div class="nav-item" :class="{ active: activeSection === 'config' }" @click="activeSection = 'config'">配置插件</div>
     </aside>
     <main class="content">
         <div class="status-bar">{{ statusText }}</div>
+
+        <!-- 数据概览 -->
+        <section v-if="activeSection === 'dashboard'" class="dashboard">
+            <div class="section-head">
+                <h2>数据概览</h2>
+                <button class="ghost" @click="refreshStats" :disabled="statsLoading">{{ statsLoading ? '刷新中...' : '刷新数据' }}</button>
+            </div>
+
+            <div class="stat-grid">
+                <div class="stat-card">
+                    <div class="stat-label">今日下载</div>
+                    <div class="stat-value">{{ stats.today.count }}</div>
+                    <div class="stat-sub">成功 {{ stats.today.success }} · 失败 {{ stats.today.failed }}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">累计下载</div>
+                    <div class="stat-value">{{ stats.totals.count }}</div>
+                    <div class="stat-sub">累计流量 {{ formatBytes(stats.totals.bytes) }}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">成功率</div>
+                    <div class="stat-value">{{ stats.success_rate }}<span class="stat-unit">%</span></div>
+                    <div class="stat-sub">成功 {{ stats.totals.success }} · 失败 {{ stats.totals.failed }}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">下载目录</div>
+                    <div class="stat-value">{{ stats.storage.files }}<span class="stat-unit">个文件</span></div>
+                    <div class="stat-sub">占用 {{ formatBytes(stats.storage.bytes) }}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">可用 Cookie</div>
+                    <div class="stat-value">{{ stats.cookies.enabled }}<span class="stat-unit">/ {{ stats.cookies.total }}</span></div>
+                    <div class="stat-sub">{{ stats.cookies.enabled > 0 ? '高清画质已启用' : '未登录，仅能下载低清' }}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">FFmpeg</div>
+                    <div class="stat-value stat-small" :class="ffmpegStatus.status === 'ready' ? 'ok' : 'warn'">
+                        {{ ffmpegStatus.status === 'ready' ? '就绪' : (ffmpegStatus.status === 'downloading' ? '下载中' : '未就绪') }}
+                    </div>
+                    <div class="stat-sub">{{ ffmpegStatus.message }}</div>
+                </div>
+            </div>
+
+            <div class="panel-grid">
+                <div class="glass-card">
+                    <h2>近 7 天下载趋势</h2>
+                    <div class="chart">
+                        <div v-for="d in stats.days" :key="d.date" class="chart-col">
+                            <div class="chart-bar-wrap" :title="d.date + '：' + d.count + ' 次'">
+                                <div class="chart-bar" :style="{ height: barHeight(d.count) }"></div>
+                            </div>
+                            <div class="chart-value">{{ d.count }}</div>
+                            <div class="chart-label">{{ d.label }}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="glass-card">
+                    <h2>类型分布</h2>
+                    <div v-if="typeRows.length === 0" class="empty">暂无下载数据</div>
+                    <div v-for="t in typeRows" :key="t.key" class="type-row">
+                        <span class="type-name">{{ t.label }}</span>
+                        <div class="type-track"><div class="type-fill" :style="{ width: t.pct + '%' }"></div></div>
+                        <span class="type-count">{{ t.count }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="glass-card">
+                <h2>最近下载</h2>
+                <table class="recent-table" v-if="stats.recent.length > 0">
+                    <thead>
+                        <tr><th>时间</th><th>类型</th><th>标题</th><th>大小</th><th>状态</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(r, i) in stats.recent" :key="i">
+                            <td class="mono">{{ formatTime(r.ts) }}</td>
+                            <td>{{ typeLabel(r.type) }}</td>
+                            <td class="title-cell" :title="r.title">{{ r.title || '（无标题）' }}</td>
+                            <td class="mono">{{ r.bytes ? formatBytes(r.bytes) : '-' }}</td>
+                            <td><span class="pill" :class="r.ok ? 'ok' : 'bad'">{{ r.ok ? '成功' : '失败' }}</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div v-else class="empty">还没有下载记录，发个 B 站链接试试</div>
+            </div>
+        </section>
+
         <!-- 扫码登录 -->
         <section v-if="activeSection === 'qrcode'">
             <div class="glass-card">
                 <h2>扫码登录</h2>
+                <p class="hint">使用 B 站 App 扫码，登录后自动保存 Cookie，可下载更高画质。</p>
                 <div v-if="qrUrl" class="qr-box">
                     <img :src="qrUrl" alt="二维码">
                 </div>
                 <button @click="generateQR" :disabled="isLoading">{{ isLoading ? '生成中...' : '重新生成二维码' }}</button>
             </div>
         </section>
-        <!-- 账密登录 -->
-        <section v-if="activeSection === 'password'">
-            <div class="form-group">
-                <h2>账密登录</h2>
-                <input v-model="passwordForm.username" type="text" placeholder="用户名/手机号/邮箱">
-                <input v-model="passwordForm.password" type="password" placeholder="密码">
-                <button @click="submitPasswordLogin" :disabled="passwordLoading">{{ passwordLoading ? '登录中...' : '登录' }}</button>
-                <p class="hint">B站账密登录涉及复杂验证码，此功能暂不可用，请使用扫码登录。</p>
-            </div>
-        </section>
+
         <!-- Cookie 输入 -->
         <section v-if="activeSection === 'cookie-input'">
             <div class="form-group">
@@ -54,6 +134,7 @@ export const TEMPLATE = `
                 <button @click="addManualCookie">添加 Cookie</button>
             </div>
         </section>
+
         <!-- Cookie 管理 -->
         <section v-if="activeSection === 'cookie-manage'">
             <div class="glass-card">
@@ -73,6 +154,7 @@ export const TEMPLATE = `
                 </div>
             </div>
         </section>
+
         <!-- 配置插件 -->
         <section v-if="activeSection === 'config'">
             <div class="form-group">
@@ -85,7 +167,7 @@ export const TEMPLATE = `
                 <input v-model="configForm.quality" type="number" min="1">
                 <button @click="saveConfig" :disabled="configLoading">{{ configLoading ? '保存中...' : '保存配置' }}</button>
             </div>
-            
+
             <div class="form-group" style="margin-top: 20px;">
                 <h2>FFmpeg 环境配置</h2>
                 <p class="hint">FFmpeg 用于合并 DASH 格式的分离音视频流，缺少它视频将无声。</p>

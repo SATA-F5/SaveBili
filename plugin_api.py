@@ -22,7 +22,7 @@ class PluginAPI:
     def register(self, context):
         routes = [
             ("/api/qrcode/generate", "handle_qrcode_generate", ["GET"]),
-            ("/api/login/password", "handle_password_login", ["POST"]),
+            ("/api/stats", "handle_stats", ["GET"]),
             ("/api/cookies", "handle_get_cookies", ["GET"]),
             ("/api/cookies/add", "handle_add_cookie", ["POST"]),
             ("/api/cookies/update", "handle_update_cookie", ["POST"]),
@@ -137,17 +137,40 @@ class PluginAPI:
         self.plugin.cookies.append(new_cookie)
         self.plugin._save_cookies()
 
-    # ---------- 账密登录（占位） ----------
-    async def handle_password_login(self):
-        data = await request.get_json()
-        username = data.get("username", "").strip()
-        password = data.get("password", "").strip()
-        if not username or not password:
-            return jsonify({"success": False, "error": "用户名和密码不能为空"})
-        return jsonify({
-            "success": False,
-            "error": "账密登录暂不可用，请使用扫码登录或手动添加 Cookie"
-        })
+    # ---------- 数据概览 ----------
+    @staticmethod
+    def _scan_downloads(path: str) -> dict:
+        """统计下载目录的文件数与占用大小（粗略，最多扫描 20000 个文件）。"""
+        files = 0
+        total = 0
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_file():
+                            continue
+                        files += 1
+                        total += entry.stat().st_size
+                    except OSError:
+                        continue
+                    if files >= 20000:
+                        break
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"统计下载目录失败: {e}")
+        return {"files": files, "bytes": total}
+
+    async def handle_stats(self):
+        try:
+            stats = self.plugin.build_stats()
+            stats["storage"] = await asyncio.to_thread(
+                self._scan_downloads, self.plugin.download_dir
+            )
+            return jsonify({"success": True, "stats": stats})
+        except Exception as e:
+            logger.error(f"获取统计数据失败: {e}")
+            return jsonify({"success": False, "error": str(e)})
 
     # ---------- Cookie 管理 ----------
     async def handle_get_cookies(self):
