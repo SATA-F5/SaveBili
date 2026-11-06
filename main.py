@@ -1,7 +1,6 @@
 import re
 import os
 import platform
-import subprocess
 import time
 import json
 import asyncio
@@ -18,17 +17,10 @@ from urllib.parse import urlparse, parse_qs
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register, StarTools
 import astrbot.api.message_components as Comp
 
 from .plugin_api import PluginAPI
-
-# 某些运行环境（pythonw、被重定向的 stdout）没有 reconfigure，不能让它在导入期炸掉插件
-try:
-    if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
 
 gk_art = r"""//       ________ __    _____    __                  __   _
 //      / ____/ //_/   / ___/   / /_   __  __   ____/ /  (_)  ____
@@ -36,10 +28,11 @@ gk_art = r"""//       ________ __    _____    __                  __   _
 //    / /_/ / /| |    ___/ /  / /_   / /_/ /  / /_/ /  / /  / /_/ /
 //    \____/_/ |_|   /____/   \__/   \__,_/   \__,_/  /_/   \____/
 """
-print(gk_art)
+
+logger.info(gk_art)
 
 
-@register("saveany_bilibili_downloader", "SATA-F5",
+@register("astrbot_plugin_bili_downloader", "SATA-F5",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
           "1.2.1",
           "https://github.com/SATA-F5/SaveBili")
@@ -131,10 +124,50 @@ class SaveAnyBilibiliDownloader(Star):
         self.plugin_api = PluginAPI(self)
         self._recent_requests = {}
 
-    # ============ 核心修复：路径探测 ============
+    # ============ 数据目录 ============
+    PLUGIN_DIR_NAME = "astrbot_plugin_bili_downloader"
+    LEGACY_DIR_NAME = "saveany_bilibili_downloader"
+
     def _get_data_dir(self, context: Context) -> Path:
-        """多候选路径探测，避免 ASTRBOT_DATA_DIR 拼接错误。"""
-        PLUGIN_DIR_NAME = "saveany_bilibili_downloader"
+        """数据目录优先走官方 StarTools.get_data_dir()，并迁移旧版本目录。"""
+        try:
+            data_dir = Path(StarTools.get_data_dir(self.PLUGIN_DIR_NAME))
+            self._migrate_legacy_data(data_dir, context)
+            return data_dir
+        except Exception as e:
+            logger.warning(f"[路径] StarTools.get_data_dir() 不可用，回退到兼容探测: {e}")
+
+        # 老版本 AstrBot / 非标准部署的兜底逻辑
+        data_dir = self._legacy_data_dir(context)
+        return data_dir
+
+    def _migrate_legacy_data(self, target: Path, context: Context) -> None:
+        """把旧版数据目录（saveany_bilibili_downloader）里的文件迁移一次。"""
+        if (target / "cookies.json").exists():
+            return
+        try:
+            legacy = self._legacy_data_dir(context, create=False)
+        except Exception:
+            return
+        if legacy == target:
+            return
+        migrated = []
+        for name in ("cookies.json", "plugin_config.json", "stats.json"):
+            source = legacy / name
+            if source.is_file():
+                try:
+                    shutil.copy2(source, target / name)
+                    if name == "cookies.json" and os.name != "nt":
+                        os.chmod(target / name, 0o600)
+                    migrated.append(name)
+                except Exception as e:
+                    logger.warning(f"[路径] 迁移 {name} 失败: {e}")
+        if migrated:
+            logger.info(f"[路径] 已从旧目录迁移数据: {legacy} -> {target} ({', '.join(migrated)})")
+
+    def _legacy_data_dir(self, context: Context, create: bool = True) -> Path:
+        """旧版多候选路径探测（仅用于兼容与数据迁移）。"""
+        PLUGIN_DIR_NAME = self.LEGACY_DIR_NAME
 
         # 1. 优先用 context 提供的官方方法
         for attr in ["get_plugin_data_dir", "get_data_dir"]:
@@ -184,6 +217,9 @@ class SaveAnyBilibiliDownloader(Star):
                         # 存在但是文件 → 报错继续试下一个
                         logger.warning(f"[路径] {cand} 存在但不是目录，跳过")
                         continue
+                if not create:
+                    # 只做迁移检查时不创建目录
+                    continue
                 # 不存在：尝试递归创建（先测父目录是否能创建）
                 cand.mkdir(parents=True, exist_ok=True)
                 if cand.is_dir():
@@ -192,6 +228,10 @@ class SaveAnyBilibiliDownloader(Star):
                 if first_error is None:
                     first_error = e
                 continue
+
+        if not create and env_candidates:
+            # 不存在也返回首选路径，调用方据此判断是否需要迁移
+            return env_candidates[0]
 
         # 4. 全部失败 → 抛出，让 __init__ 的 fallback 接住
         raise RuntimeError(f"无法确定插件数据目录，最后的错误: {first_error}")
@@ -243,11 +283,23 @@ class SaveAnyBilibiliDownloader(Star):
                 self.cookies = json.loads(cookie_file.read_text(encoding="utf-8"))
             except Exception:
                 self.cookies = []
+            # 兼容从旧目录迁移过来的文件，统一收紧权限
+            if os.name != "nt":
+                try:
+                    os.chmod(cookie_file, 0o600)
+                except Exception:
+                    pass
         self._select_best_cookie()
 
     def _save_cookies(self):
         cookie_file = self.data_dir / "cookies.json"
         cookie_file.write_text(json.dumps(self.cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Cookie 属于敏感凭据，POSIX 下收紧为仅属主可读写
+        if os.name != "nt":
+            try:
+                os.chmod(cookie_file, 0o600)
+            except Exception:
+                pass
         self._select_best_cookie()
 
     def _select_best_cookie(self):
@@ -420,18 +472,30 @@ class SaveAnyBilibiliDownloader(Star):
         return "unknown"
 
     @staticmethod
-    def _probe_ffmpeg(path: str) -> str:
-        """真正执行一次 -version，返回版本行；不可用时返回空串。"""
+    async def _probe_ffmpeg(path: str) -> str:
+        """真正执行一次 -version，返回版本行；不可用时返回空串。
+
+        用 asyncio.create_subprocess_exec，避免同步 subprocess 阻塞事件循环。
+        """
+        proc = None
         try:
-            proc = subprocess.run(
-                [path, "-version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    path, "-version",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                ),
                 timeout=5,
             )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
         except Exception:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             return ""
-        output = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "ignore")
+        output = ((stdout or b"") + (stderr or b"")).decode("utf-8", "ignore")
         if proc.returncode != 0 or "ffmpeg version" not in output.lower():
             return ""
         return output.splitlines()[0].strip()[:120] if output.strip() else "ffmpeg"
@@ -457,7 +521,7 @@ class SaveAnyBilibiliDownloader(Star):
                 result.append(path)
         return result
 
-    def _detect_ffmpeg(self) -> bool:
+    async def _detect_ffmpeg(self) -> bool:
         """探测可用的 ffmpeg：系统自带优先，其次插件目录下的二进制。"""
         for path in self._ffmpeg_candidates():
             try:
@@ -471,7 +535,7 @@ class SaveAnyBilibiliDownloader(Star):
                     os.chmod(path, 0o755)
                 except Exception:
                     pass
-            version = self._probe_ffmpeg(path)
+            version = await self._probe_ffmpeg(path)
             if not version:
                 continue
             self.ffmpeg_path = path
@@ -505,8 +569,8 @@ class SaveAnyBilibiliDownloader(Star):
             logger.warning(f"[初始化] 创建下载目录失败: {e}")
         self.plugin_api.register(self.context)
         logger.info(f"B站下载插件已启动 (1.2.1) 下载目录: {self.download_dir}")
-        # 探测放到线程里，-version 探测不会阻塞事件循环
-        await asyncio.to_thread(self._detect_ffmpeg)
+        # 探测是全异步的（create_subprocess_exec），不会阻塞事件循环
+        await self._detect_ffmpeg()
 
     async def trigger_ffmpeg_download(self):
         if self.ffmpeg_status["status"] == "downloading":
@@ -597,7 +661,7 @@ class SaveAnyBilibiliDownloader(Star):
                     except Exception:
                         pass
                     raise Exception("FFmpeg 校验失败（文件无法执行或内容不完整）")
-                if not await asyncio.to_thread(self._detect_ffmpeg):
+                if not await self._detect_ffmpeg():
                     raise Exception("FFmpeg 校验通过但未能加载")
                 logger.info("[FFmpeg] 二进制校验通过")
             except Exception as e:
@@ -667,25 +731,12 @@ class SaveAnyBilibiliDownloader(Star):
         """实际执行一次 `ffmpeg -version`，确认文件是可用且完整的 ffmpeg。"""
         if not ffmpeg_path:
             return False
-        try:
-            proc = await asyncio.wait_for(
-                asyncio.create_subprocess_exec(
-                    ffmpeg_path, "-version",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                ),
-                timeout=15,
-            )
-            stdout, _ = await proc.communicate()
-            return proc.returncode == 0 and b"ffmpeg version" in (stdout or b"").lower()
-        except Exception as e:
-            logger.warning(f"[FFmpeg] 校验执行失败: {e}")
-            return False
+        return bool(await self._probe_ffmpeg(ffmpeg_path))
 
     async def _merge_with_ffmpeg(self, video_path: Path, audio_path: Path, output_path: Path):
-        ffmpeg = self.find_ffmpeg()
+        ffmpeg = await self.find_ffmpeg()
         if not ffmpeg:
-            raise RuntimeError("未找到 FFmpeg。请在 WebUI 点击按钮下载，或将 ffmpeg.exe 放到程序同目录。")
+            raise RuntimeError("未找到 FFmpeg。请在 WebUI 点击按钮下载，或用系统包管理器安装后重新检测。")
         cmd = [ffmpeg, "-y", "-i", str(video_path), "-i", str(audio_path), "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", "-movflags", "+faststart", str(output_path)]
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         _, stderr = await proc.communicate()
@@ -693,10 +744,10 @@ class SaveAnyBilibiliDownloader(Star):
             err = stderr.decode("utf-8", errors="ignore")[-800:]
             raise RuntimeError(f"FFmpeg 合并失败：{err}")
 
-    def find_ffmpeg(self) -> Optional[str]:
+    async def find_ffmpeg(self) -> Optional[str]:
         if not self.ffmpeg_path:
             # 用户可能在运行期间才装好 ffmpeg，这里自愈一次
-            self._detect_ffmpeg()
+            await self._detect_ffmpeg()
         return self.ffmpeg_path
 
     @staticmethod
@@ -1160,10 +1211,11 @@ class SaveAnyBilibiliDownloader(Star):
             if not await self._download_single_file(audio_url, audio_temp):
                 return None
             logger.info(f"开始合并音视频: {title}")
-            if not self.ffmpeg_path:
+            ffmpeg = await self.find_ffmpeg()
+            if not ffmpeg:
                 logger.error("未配置 FFmpeg")
                 return None
-            cmd = [self.ffmpeg_path, "-y", "-i", video_temp, "-i", audio_temp, "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", final_path]
+            cmd = [ffmpeg, "-y", "-i", video_temp, "-i", audio_temp, "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", final_path]
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             _, stderr = await proc.communicate()
             if proc.returncode != 0:
@@ -1177,14 +1229,31 @@ class SaveAnyBilibiliDownloader(Star):
         finally:
             for temp_file in [video_temp, audio_temp]:
                 if os.path.exists(temp_file):
-                    try: os.remove(temp_file)
-                    except: pass
+                    try:
+                        os.remove(temp_file)
+                    except OSError:
+                        pass
+
+    def _headers_for_url(self, url: str) -> dict:
+        """媒体下载请求头。
+
+        仅对 bilibili.com 主域附带 Cookie，视频/音频 CDN（bilivideo 等）只带 Referer，
+        避免把登录凭据发给非 B 站主域。
+        """
+        headers = self._bili_headers()
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            host = ""
+        if not (host == "bilibili.com" or host.endswith(".bilibili.com")):
+            headers.pop("Cookie", None)
+        return headers
 
     async def _download_single_file(self, url: str, file_path: str) -> bool:
         try:
             timeout = aiohttp.ClientTimeout(total=1800, connect=15, sock_read=30)
             async with aiohttp.ClientSession(timeout=timeout) as download_session:
-                async with download_session.get(url, headers=self._bili_headers()) as resp:
+                async with download_session.get(url, headers=self._headers_for_url(url)) as resp:
                     if resp.status != 200:
                         logger.error(f"文件下载 HTTP 错误: {resp.status}")
                         return False

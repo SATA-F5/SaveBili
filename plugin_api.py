@@ -6,12 +6,15 @@ import os
 import time
 from pathlib import Path
 
+import aiohttp
 import qrcode
 from quart import jsonify, request
 
 from astrbot.api import logger
 
 PLUGIN_NAME = "astrbot_plugin_bili_downloader"
+# 所有出站请求都带超时，避免网络异常时挂住事件循环
+BILI_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=8, sock_read=10)
 
 
 class PluginAPI:
@@ -47,8 +50,7 @@ class PluginAPI:
     # ---------- 扫码登录 ----------
     async def handle_qrcode_generate(self):
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=BILI_TIMEOUT) as session:
                 async with session.get(
                     "https://passport.bilibili.com/x/passport-login/web/qrcode/generate",
                     headers={"User-Agent": "Mozilla/5.0"},
@@ -81,12 +83,11 @@ class PluginAPI:
             return jsonify({"success": False, "error": str(e)})
 
     async def _poll_qrcode(self, qrcode_key: str):
-        import aiohttp
         deadline = time.time() + 180
         while time.time() < deadline:
             await asyncio.sleep(3)
             try:
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(timeout=BILI_TIMEOUT) as session:
                     async with session.get(
                         f"https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}",
                         headers={"User-Agent": "Mozilla/5.0"},
@@ -272,8 +273,8 @@ class PluginAPI:
 
     async def handle_ffmpeg_check(self):
         try:
-            # 重新扫描 PATH、常见安装路径与插件目录，探测放到线程里避免阻塞事件循环
-            found = await asyncio.to_thread(self.plugin._detect_ffmpeg)
+            # 重新扫描 PATH、常见安装路径与插件目录（全异步，不阻塞事件循环）
+            found = await self.plugin._detect_ffmpeg()
             return jsonify({
                 "success": True,
                 "found": bool(found),
