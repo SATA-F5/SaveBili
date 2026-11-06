@@ -17,6 +17,12 @@
 3. 在聊天中发送 `/saveany BV[号]`，或 @机器人 后发送 BV 号、视频链接、短链。
 4. 机器人会自动解析并下载视频后发送。
 
+## 平台支持
+
+- Windows / Linux（x64、arm64）/ macOS：系统已安装的 ffmpeg 会被自动识别（PATH、`/usr/bin`、`/usr/local/bin`、`/snap/bin`、`/opt/homebrew/bin` 等常见位置都会探测）。
+- 一键下载仅支持 Windows x64 与 Linux（x64 / arm64）；macOS 及其他系统请用 `brew install ffmpeg` 或系统包管理器安装，再点「重新检测」。
+- 下载文件名按 UTF-8 字节数截断，适配 Linux 255 字节的文件名限制。
+
 ## 配置项
 
 - `download_dir`：视频下载保存目录。留空时使用插件数据目录下的 `downloads`；填写相对路径时也基于插件数据目录解析（不再跟随进程工作目录）。

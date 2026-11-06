@@ -18,6 +18,11 @@
 
 - 移除无用的账密登录：删除侧边栏入口、登录表单及 `/api/login/password` 占位接口。
 - WebUI 默认进入「数据概览」页。
+- FFmpeg 探测改为多路径：`PATH` → `/usr/bin`、`/usr/local/bin`、`/snap/bin`、`/opt/homebrew/bin` 等常见位置 → 用户目录 → 插件目录，并用 `-version` 实际校验。服务环境 PATH 被裁剪时也能识别系统自带的 ffmpeg，不再误判成"未安装"。
+- 新增「重新检测」按钮与 `POST /api/ffmpeg/check`；已就绪时隐藏「一键下载」，并给出对应平台的安装命令提示。
+- 自动下载按平台分流：Windows x64、Linux x64 / arm64 分别取对应构建；macOS 与其他系统不再错误地下载 Linux 二进制，改为提示用 `brew`/包管理器安装。
+- 文件名按 UTF-8 字节数截断（Linux 上限 255 字节），避免超长中文标题在 Ubuntu 上写文件失败。
+- `sys.stdout.reconfigure` 加保护，`pythonw` / 重定向输出等环境下导入不再报错。
 
 - 所有指令/事件处理器改为生成器，用 `yield event.plain_result()` / `yield event.chain_result()` 交给 AstrBot 发送，不再在后台任务里调用 `event.send()`，消息顺序与失败重试由框架统一处理。
 - 去掉「已接收您的请求」这条独立提示，文案与封面合并为一张信息卡片，减少一条消息。

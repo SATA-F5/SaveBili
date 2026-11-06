@@ -170,16 +170,24 @@ export const TEMPLATE = `
 
             <div class="form-group" style="margin-top: 20px;">
                 <h2>FFmpeg 环境配置</h2>
-                <p class="hint">FFmpeg 用于合并 DASH 格式的分离音视频流，缺少它视频将无声。</p>
+                <p class="hint">FFmpeg 用于合并 DASH 格式的分离音视频流，缺少它视频将无声。已安装的系统版本会被自动识别。</p>
                 <div style="margin: 10px 0; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px;">
                     <span>当前状态：</span>
                     <span :style="{ color: ffmpegStatus.status === 'ready' ? '#00d2ff' : (ffmpegStatus.status === 'error' ? '#ff416c' : '#aaa') }">
                         {{ ffmpegStatus.message }}
                     </span>
+                    <div v-if="ffmpegStatus.version" class="hint mono-line">{{ ffmpegStatus.version }}</div>
+                    <div v-if="ffmpegStatus.path" class="hint mono-line">路径：{{ ffmpegStatus.path }}</div>
                 </div>
-                <button @click="downloadFFmpeg" :disabled="ffmpegStatus.status === 'downloading'">
-                    {{ ffmpegStatus.status === 'downloading' ? '正在下载中，请稍候...' : '一键下载 FFmpeg' }}
-                </button>
+                <div class="row-actions">
+                    <button class="ghost" @click="checkFFmpeg" :disabled="ffmpegStatus.status === 'downloading'">
+                        {{ checkingFFmpeg ? '检测中...' : '重新检测' }}
+                    </button>
+                    <button v-if="ffmpegStatus.status !== 'ready'" @click="downloadFFmpeg" :disabled="ffmpegStatus.status === 'downloading'">
+                        {{ ffmpegStatus.status === 'downloading' ? '正在下载中，请稍候...' : '一键下载 FFmpeg' }}
+                    </button>
+                </div>
+                <p class="hint" v-if="ffmpegStatus.status !== 'ready'">{{ ffmpegHint }}</p>
             </div>
         </section>
     </main>

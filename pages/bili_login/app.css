@@ -349,6 +349,22 @@ button.danger:hover {
     line-height: 1.5;
 }
 
+.mono-line {
+    word-break: break-all;
+    font-family: 'Cascadia Code', Consolas, monospace;
+    font-size: 0.75rem;
+    opacity: 0.85;
+}
+
+.row-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.row-actions button { margin-top: 6px; }
+
 /* ========== 确认弹窗 ========== */
 .modal-overlay {
     position: fixed;

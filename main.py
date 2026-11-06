@@ -1,5 +1,7 @@
 import re
 import os
+import platform
+import subprocess
 import time
 import json
 import asyncio
@@ -21,7 +23,12 @@ import astrbot.api.message_components as Comp
 
 from .plugin_api import PluginAPI
 
-sys.stdout.reconfigure(encoding='utf-8')
+# 某些运行环境（pythonw、被重定向的 stdout）没有 reconfigure，不能让它在导入期炸掉插件
+try:
+    if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 gk_art = r"""//       ________ __    _____    __                  __   _
 //      / ____/ //_/   / ___/   / /_   __  __   ____/ /  (_)  ____
@@ -382,29 +389,112 @@ class SaveAnyBilibiliDownloader(Star):
             "ffmpeg": self.ffmpeg_status,
         }
 
-    def _check_ffmpeg_local(self):
-        system_ffmpeg = shutil.which("ffmpeg")
-        if system_ffmpeg:
-            self.ffmpeg_path = system_ffmpeg
-            self.ffmpeg_status = {"status": "ready", "message": "已检测到系统自带的 FFmpeg"}
-            return
+    # ============ FFmpeg 探测（多平台） ============
+    # 服务环境（systemd / docker / nohup）的 PATH 常常被裁剪，只靠 which 会漏掉系统自带的 ffmpeg
+    FFMPEG_COMMON_PATHS = {
+        "nt": [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+        ],
+        "posix": [
+            "/usr/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/bin/ffmpeg",
+            "/snap/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/opt/ffmpeg/bin/ffmpeg",
+            "/opt/local/bin/ffmpeg",
+            "/opt/ffmpeg/bin/ffmpeg",
+        ],
+    }
 
-        bin_dir = self.data_dir / "bin"
+    @staticmethod
+    def _platform_tag() -> str:
+        if os.name == "nt":
+            return "windows"
+        if sys.platform == "darwin":
+            return "darwin"
+        if sys.platform.startswith("linux"):
+            return "linux"
+        return "unknown"
+
+    @staticmethod
+    def _probe_ffmpeg(path: str) -> str:
+        """真正执行一次 -version，返回版本行；不可用时返回空串。"""
         try:
-            bin_dir.mkdir(parents=True, exist_ok=True)
+            proc = subprocess.run(
+                [path, "-version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+            )
         except Exception:
-            pass
-        ffmpeg_exe = bin_dir / "ffmpeg.exe" if os.name == 'nt' else bin_dir / "ffmpeg"
-        if ffmpeg_exe.exists():
-            self.ffmpeg_path = str(ffmpeg_exe)
-            self.ffmpeg_status = {"status": "ready", "message": "已检测到插件目录下的 FFmpeg"}
-            if os.name != 'nt':
+            return ""
+        output = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "ignore")
+        if proc.returncode != 0 or "ffmpeg version" not in output.lower():
+            return ""
+        return output.splitlines()[0].strip()[:120] if output.strip() else "ffmpeg"
+
+    def _ffmpeg_candidates(self) -> List[str]:
+        """按优先级列出候选：PATH → 常见安装路径 → 用户目录 → 插件目录。"""
+        exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+        candidates = []
+        for name in ("ffmpeg", exe):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+        candidates.extend(self.FFMPEG_COMMON_PATHS["nt" if os.name == "nt" else "posix"])
+        candidates.append(str(Path.home() / ".local" / "bin" / exe))
+        if os.name == "nt":
+            local_appdata = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+            candidates.append(str(Path(local_appdata) / "Microsoft" / "WinGet" / "Links" / exe))
+        candidates.append(str(self.data_dir / "bin" / exe))
+
+        result = []
+        for path in candidates:
+            if path and path not in result:
+                result.append(path)
+        return result
+
+    def _detect_ffmpeg(self) -> bool:
+        """探测可用的 ffmpeg：系统自带优先，其次插件目录下的二进制。"""
+        for path in self._ffmpeg_candidates():
+            try:
+                if not os.path.isfile(path):
+                    continue
+            except OSError:
+                continue
+            if os.name != "nt":
+                # 静态下载的二进制可能缺少执行位
                 try:
-                    os.chmod(self.ffmpeg_path, 0o755)
+                    os.chmod(path, 0o755)
                 except Exception:
                     pass
-        else:
-            self.ffmpeg_status = {"status": "idle", "message": "未检测到 FFmpeg，可点击右侧按钮一键下载"}
+            version = self._probe_ffmpeg(path)
+            if not version:
+                continue
+            self.ffmpeg_path = path
+            source = "插件目录下的" if str(path).startswith(str(self.data_dir)) else "系统自带的"
+            self.ffmpeg_status = {
+                "status": "ready",
+                "message": f"已检测到{source} FFmpeg",
+                "path": path,
+                "version": version,
+                "platform": self._platform_tag(),
+            }
+            logger.info(f"[FFmpeg] 已检测到: {path} ({version})")
+            return True
+
+        self.ffmpeg_path = None
+        self.ffmpeg_status = {
+            "status": "idle",
+            "message": "未检测到 FFmpeg，可点击下方按钮下载，或用系统包管理器安装",
+            "path": "",
+            "version": "",
+            "platform": self._platform_tag(),
+        }
+        return False
 
     async def initialize(self):
         timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=15)
@@ -415,7 +505,8 @@ class SaveAnyBilibiliDownloader(Star):
             logger.warning(f"[初始化] 创建下载目录失败: {e}")
         self.plugin_api.register(self.context)
         logger.info(f"B站下载插件已启动 (1.2.1) 下载目录: {self.download_dir}")
-        self._check_ffmpeg_local()
+        # 探测放到线程里，-version 探测不会阻塞事件循环
+        await asyncio.to_thread(self._detect_ffmpeg)
 
     async def trigger_ffmpeg_download(self):
         if self.ffmpeg_status["status"] == "downloading":
@@ -427,16 +518,27 @@ class SaveAnyBilibiliDownloader(Star):
                 bin_dir = self.data_dir / "bin"
                 bin_dir.mkdir(parents=True, exist_ok=True)
 
-                if os.name == 'nt':
+                plat = self._platform_tag()
+                machine = platform.machine().lower()
+                if plat == "windows":
                     github_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
                     temp_file = self.data_dir / "ffmpeg_temp.zip"
                     target_name = "ffmpeg.exe"
                     extract_func = self._extract_zip
-                else:
-                    github_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+                elif plat == "linux":
+                    arch = "linuxarm64" if machine in ("aarch64", "arm64") else "linux64"
+                    github_url = (
+                        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+                        f"ffmpeg-master-latest-{arch}-gpl.tar.xz"
+                    )
                     temp_file = self.data_dir / "ffmpeg_temp.tar.xz"
                     target_name = "ffmpeg"
                     extract_func = self._extract_tar
+                else:
+                    raise Exception(
+                        "当前系统不支持自动下载 FFmpeg：macOS 请用 brew install ffmpeg，"
+                        "其他系统请用系统包管理器安装后再点“重新检测”"
+                    )
 
                 # 官方源优先，失败后再走镜像；镜像仅作为网络受限时的备用通道
                 sources = [""] + list(self.FFMPEG_MIRROR_CANDIDATES)
@@ -495,8 +597,7 @@ class SaveAnyBilibiliDownloader(Star):
                     except Exception:
                         pass
                     raise Exception("FFmpeg 校验失败（文件无法执行或内容不完整）")
-                self._check_ffmpeg_local()
-                if self.ffmpeg_status["status"] != "ready":
+                if not await asyncio.to_thread(self._detect_ffmpeg):
                     raise Exception("FFmpeg 校验通过但未能加载")
                 logger.info("[FFmpeg] 二进制校验通过")
             except Exception as e:
@@ -593,7 +694,22 @@ class SaveAnyBilibiliDownloader(Star):
             raise RuntimeError(f"FFmpeg 合并失败：{err}")
 
     def find_ffmpeg(self) -> Optional[str]:
+        if not self.ffmpeg_path:
+            # 用户可能在运行期间才装好 ffmpeg，这里自愈一次
+            self._detect_ffmpeg()
         return self.ffmpeg_path
+
+    @staticmethod
+    def _safe_filename(title: str, limit_bytes: int = 150) -> str:
+        """清掉非法字符并按 UTF-8 字节数截断。
+
+        Linux 文件名上限是 255 字节，中文标题按字符数截断很容易超限；
+        这里按字节截断，给时间戳后缀留出余量。
+        """
+        name = re.sub(r'[\\/*?:"<>|\x00-\x1f]', "_", title or "").strip() or "video"
+        if len(name.encode("utf-8")) > limit_bytes:
+            name = name.encode("utf-8")[:limit_bytes].decode("utf-8", "ignore").rstrip()
+        return name or "video"
 
     @filter.command("saveany")
     async def saveany(self, event: AstrMessageEvent, url: str):
@@ -1017,7 +1133,7 @@ class SaveAnyBilibiliDownloader(Star):
         return None
 
     async def download_file(self, download_url: str, title: str, audio_url: str = None) -> str:
-        safe_title = re.sub(r'[\\/*?:"<>|]', '_', title)[:100]
+        safe_title = self._safe_filename(title)
         timestamp = int(time.time())
 
         if not audio_url:
@@ -1088,7 +1204,7 @@ class SaveAnyBilibiliDownloader(Star):
                 yield event.plain_result("专栏获取失败，请查看控制台日志。")
                 return
             text = self._html_to_text(d.get("content", ""))
-            txt_path = os.path.join(self.download_dir, f"{re.sub(r'[\\\\/*?:\"<>|]', '_', d.get('title', 'article'))[:80]}.txt")
+            txt_path = os.path.join(self.download_dir, f"{self._safe_filename(d.get('title', 'article'), 120)}.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(f"{d.get('title')}\n作者：{d.get('author', {}).get('name')}\n链接：https://www.bilibili.com/read/cv{article_id}\n\n{text}")
             self.record_download("article", d.get("title"), True, os.path.getsize(txt_path))

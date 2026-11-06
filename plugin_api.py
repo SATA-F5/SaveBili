@@ -32,6 +32,7 @@ class PluginAPI:
             ("/api/config/update", "handle_update_config", ["POST"]),
             # 新增 FFmpeg 相关接口
             ("/api/ffmpeg/status", "handle_ffmpeg_status", ["GET"]),
+            ("/api/ffmpeg/check", "handle_ffmpeg_check", ["POST"]),
             ("/api/ffmpeg/download", "handle_ffmpeg_download", ["POST"]),
         ]
         for route, handler_name, methods in routes:
@@ -268,6 +269,19 @@ class PluginAPI:
             "success": True,
             "status": self.plugin.ffmpeg_status
         })
+
+    async def handle_ffmpeg_check(self):
+        try:
+            # 重新扫描 PATH、常见安装路径与插件目录，探测放到线程里避免阻塞事件循环
+            found = await asyncio.to_thread(self.plugin._detect_ffmpeg)
+            return jsonify({
+                "success": True,
+                "found": bool(found),
+                "status": self.plugin.ffmpeg_status,
+            })
+        except Exception as e:
+            logger.error(f"检测 FFmpeg 失败: {e}")
+            return jsonify({"success": False, "error": str(e)})
 
     async def handle_ffmpeg_download(self):
         try:

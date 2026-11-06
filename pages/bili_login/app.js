@@ -104,6 +104,13 @@ createApp({
             if (c === 0) return '3%';
             return Math.max(8, Math.round((c / maxDayCount.value) * 100)) + '%';
         };
+        const ffmpegHint = computed(() => {
+            const tag = (ffmpegStatus.value && ffmpegStatus.value.platform) || '';
+            if (tag === 'linux') return 'Ubuntu/Debian：sudo apt install ffmpeg；CentOS/RHEL：sudo dnf install ffmpeg。装好后点“重新检测”。';
+            if (tag === 'darwin') return 'macOS：brew install ffmpeg（本插件不自动下载 macOS 二进制）。';
+            if (tag === 'windows') return 'Windows：winget install ffmpeg，或直接使用上方按钮下载。';
+            return '请用系统包管理器安装 ffmpeg，然后点“重新检测”。';
+        });
 
         // ---------- 数据概览 ----------
         const loadStats = async () => {
@@ -289,6 +296,7 @@ createApp({
         };
 
         // ---------- FFmpeg ----------
+        const checkingFFmpeg = ref(false);
         const loadFFmpegStatus = async () => {
             try {
                 const data = await apiGet('api/ffmpeg/status');
@@ -296,6 +304,25 @@ createApp({
                     ffmpegStatus.value = data.status;
                 }
             } catch (e) { console.error(e); }
+        };
+
+        const checkFFmpeg = async () => {
+            checkingFFmpeg.value = true;
+            try {
+                const data = await apiPost('api/ffmpeg/check', {});
+                if (data.success) {
+                    ffmpegStatus.value = data.status;
+                    statusText.value = data.found ? '已检测到 FFmpeg' : '仍未检测到 FFmpeg';
+                    showToast(data.found ? '已检测到 FFmpeg' : '仍未检测到 FFmpeg');
+                    await loadStats();
+                } else {
+                    showToast(data.error || '检测失败');
+                }
+            } catch (e) {
+                showToast('检测异常：' + e.message);
+            } finally {
+                checkingFFmpeg.value = false;
+            }
         };
 
         const downloadFFmpeg = async () => {
@@ -354,6 +381,8 @@ createApp({
             statsLoading,
             typeRows,
             barHeight,
+            ffmpegHint,
+            checkingFFmpeg,
             formatBytes,
             formatTime,
             typeLabel,
@@ -369,6 +398,7 @@ createApp({
             cancelClearAll,
             saveConfig,
             downloadFFmpeg,
+            checkFFmpeg,
             refreshStats,
         };
     },
