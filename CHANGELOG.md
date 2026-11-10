@@ -2,6 +2,14 @@
 
 本项目的重要变更记录在此文件中。
 
+## [未发布] - 2026-11-10
+
+### 变更
+
+- 仓库地址更新：`https://github.com/SATA-F5/SaveBili` → `https://github.com/Shou-Lu/SaveBili`（GitHub 账号改名，旧地址会由 GitHub 自动跳转）。
+- 作者名称更改：`SATA-F5` → `守禄`。`main.py` 的 `@register`、`astrbot_plugin.json`、`metadata.yaml` 中的作者与仓库字段均已同步，插件 ID 随之变为 `守禄/astrbot_plugin_bili_downloader`。
+- 历史变更记录中的 `SATA-F5` 为旧署名，按"不改写历史"原则保留原文。
+
 ## [1.2.2] - 2026-11-07
 
 多平台兼容、发送流程修复与审核合规整改。

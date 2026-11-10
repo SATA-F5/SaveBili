@@ -32,10 +32,10 @@ gk_art = r"""//       ________ __    _____    __                  __   _
 logger.info(gk_art)
 
 
-@register("astrbot_plugin_bili_downloader", "SATA-F5",
+@register("astrbot_plugin_bili_downloader", "守禄",
           "使用 saveany 解析并下载 B 站内容，支持视频/番剧/专栏/收藏夹/合集/动态，多 Cookie 管理",
           "1.2.2",
-          "https://github.com/SATA-F5/SaveBili")
+          "https://github.com/Shou-Lu/SaveBili")
 class SaveAnyBilibiliDownloader(Star):
 
     # B 站短链域名（分享链接常见形式：https://b23.tv/xxxx）
